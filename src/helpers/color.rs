@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ const CARD_LIGHTEN_DARK: f32 = 1.0;
 const CARD_DARKEN_LIGHT: f32 = 0.02;
 
 /// Shared card surface color: one small step off the theme background. Used by
-/// the server cards (Home) and the config-editor cards so the two match.
+/// the Home card and any other elevated panel so they match.
 pub fn card_background(cx: &App) -> Hsla {
     if cx.theme().is_dark() {
         cx.theme().background.lighten(CARD_LIGHTEN_DARK)

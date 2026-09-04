@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,16 +50,40 @@ use tracing::{debug, error, info};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Always-current manifest, served by GitHub from the latest non-prerelease.
-const MANIFEST_URL: &str = "https://github.com/vicanso/zedis/releases/latest/download/latest.json";
-/// `/releases/latest` returns the most recent non-prerelease, non-draft release.
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/vicanso/zedis/releases/latest";
-/// Browser fallback when no manifest/asset is available.
-const RELEASES_PAGE: &str = "https://github.com/vicanso/zedis/releases/latest";
-/// The release list, newest first, for the pre-release channel: tagged
-/// pre-releases and the rolling `nightly` build both live here and never in
-/// `/releases/latest`.
-const RELEASE_LIST_API: &str = "https://api.github.com/repos/vicanso/zedis/releases?per_page=15";
+fn github_slug() -> &'static str {
+    static SLUG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SLUG.get_or_init(|| {
+        env!("CARGO_PKG_REPOSITORY")
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .rsplit_once("github.com/")
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| "xhofe/gpui-starter".to_string())
+    })
+}
+
+fn manifest_url() -> String {
+    format!(
+        "https://github.com/{}/releases/latest/download/latest.json",
+        github_slug()
+    )
+}
+
+fn latest_release_api() -> String {
+    format!("https://api.github.com/repos/{}/releases/latest", github_slug())
+}
+
+fn releases_page() -> String {
+    format!("https://github.com/{}/releases/latest", github_slug())
+}
+
+fn release_list_api() -> String {
+    format!("https://api.github.com/repos/{}/releases?per_page=15", github_slug())
+}
+
+fn asset_prefix() -> &'static str {
+    concat!(env!("CARGO_PKG_NAME"), "-")
+}
 /// The rolling build publish.yml recreates on every push to main.
 const NIGHTLY_TAG: &str = "nightly";
 /// A nightly published this soon after our own build time is this very
@@ -70,7 +94,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Upper bound on an installer download (guards against a runaway body).
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const USER_AGENT: &str = concat!("zedis/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 /// The installer asset matching this machine's `os`/`arch`, with the checksum to
 /// verify it after download.
@@ -154,7 +178,7 @@ struct GithubAsset {
 }
 
 /// The API's asset list in the manifest's shape, read off the file names
-/// publish.yml uses (`zedis-<os>-<arch>.<kind>`): what a release without
+/// publish.yml uses (`gpui-starter-<os>-<arch>.<kind>`): what a release without
 /// a `latest.json` (the nightly) can still offer to install. No checksum
 /// travels with it, so the download is not verified — the page link stays
 /// beside it.
@@ -162,7 +186,7 @@ fn assets_from_api(assets: &[GithubAsset]) -> Vec<ManifestAsset> {
     assets
         .iter()
         .filter_map(|asset| {
-            let stem = asset.name.strip_prefix("zedis-")?;
+            let stem = asset.name.strip_prefix(asset_prefix())?;
             let (os, rest) = stem.split_once('-')?;
             let (arch, kind) = rest.rsplit_once('.')?;
             Some(ManifestAsset {
@@ -203,14 +227,14 @@ pub fn fetch_latest_release(include_prerelease: bool) -> Result<Option<UpdateInf
 }
 
 fn fetch_from_manifest() -> Result<Option<UpdateInfo>> {
-    let text = http_get_string(MANIFEST_URL)?;
+    let text = http_get_string(&manifest_url())?;
     let manifest: Manifest = serde_json::from_str(&text)?;
     let Some(latest) = newer_version(&manifest.version)? else {
         return Ok(None);
     };
     let asset = pick_asset(&manifest.assets);
     let page_url = if manifest.notes.trim().is_empty() {
-        RELEASES_PAGE.to_string()
+        releases_page()
     } else {
         manifest.notes.clone()
     };
@@ -230,7 +254,7 @@ fn fetch_from_manifest() -> Result<Option<UpdateInfo>> {
 /// per discovered update, well inside the anonymous API quota.
 fn fetch_release_notes(version: &str) -> String {
     let fetch = || -> Result<String> {
-        let text = http_get_string(LATEST_RELEASE_API)?;
+        let text = http_get_string(&latest_release_api())?;
         let release: GithubRelease = serde_json::from_str(&text)?;
         // The API's "latest" can briefly disagree with the manifest (CDN
         // caching, mid-publish) — only trust the body when both name the
@@ -254,11 +278,11 @@ fn fetch_release_notes(version: &str) -> String {
 /// (stable or pre-release, by version) or the `nightly` (by publish time,
 /// which only a build older than it can be behind). Nothing newer → `None`.
 fn fetch_from_release_list() -> Result<Option<UpdateInfo>> {
-    let text = http_get_string(RELEASE_LIST_API)?;
+    let text = http_get_string(&release_list_api())?;
     let releases: Vec<GithubRelease> = serde_json::from_str(&text)?;
     for release in releases.into_iter().filter(|r| !r.draft) {
         let page_url = if release.html_url.trim().is_empty() {
-            RELEASES_PAGE.to_string()
+            releases_page()
         } else {
             release.html_url.clone()
         };
@@ -283,7 +307,8 @@ fn fetch_from_release_list() -> Result<Option<UpdateInfo>> {
         // A tagged release carries a manifest with checksums; the API's
         // asset list is the fallback for one that has none yet.
         let manifest_url = format!(
-            "https://github.com/vicanso/zedis/releases/download/{}/latest.json",
+            "https://github.com/{}/releases/download/{}/latest.json",
+            github_slug(),
             release.tag_name
         );
         let asset = http_get_string(&manifest_url)
@@ -328,7 +353,7 @@ fn current_version_label() -> String {
 }
 
 fn fetch_from_api() -> Result<Option<UpdateInfo>> {
-    let text = http_get_string(LATEST_RELEASE_API)?;
+    let text = http_get_string(&latest_release_api())?;
     let release: GithubRelease = serde_json::from_str(&text)?;
     if release.draft || release.prerelease {
         return Ok(None);
@@ -337,7 +362,7 @@ fn fetch_from_api() -> Result<Option<UpdateInfo>> {
         return Ok(None);
     };
     let page_url = if release.html_url.trim().is_empty() {
-        RELEASES_PAGE.to_string()
+        releases_page()
     } else {
         release.html_url
     };
@@ -502,13 +527,13 @@ pub fn download_and_verify(asset: &UpdateAsset, mut on_progress: impl FnMut(u64,
     Ok(path)
 }
 
-/// Whether finishing the install needs Zedis to quit — the answer differs per
+/// Whether finishing the install needs this app to quit — the answer differs per
 /// platform because "installing" means something different on each:
 ///
-/// * **macOS** (`.dmg`): the user drags the new `Zedis.app` over the running one
+/// * **macOS** (`.dmg`): the user drags the new `GPUI Starter.app` over the running one
 ///   in `/Applications`. The live process has the old bundle's pages mapped, so
 ///   replacing it underneath can fault it (bad code signature / `SIGBUS`).
-/// * **Windows** (`.msi`): msiexec cannot replace a running `zedis.exe`; it
+/// * **Windows** (`.msi`): msiexec cannot replace a running `gpui-starter.exe`; it
 ///   raises the "files in use" prompt (or demands a reboot) instead.
 /// * **Linux** (AppImage / tarball): not an installer at all — nothing needs the
 ///   process gone, and quitting would strand the user with no new version.
@@ -516,11 +541,11 @@ pub const fn installer_requires_quit() -> bool {
     cfg!(not(target_os = "linux"))
 }
 
-/// Bring the installer's own UI forward, right before Zedis quits.
+/// Bring the installer's own UI forward, right before this app quits.
 ///
 /// On macOS the `.dmg` is handed to LaunchServices, which mounts it and has
 /// **Finder** open the drag-to-Applications window. Quitting gives focus to
-/// whichever app was active before Zedis (a terminal, an editor…) rather than to
+/// whichever app was active before this one (a terminal, an editor…) rather than to
 /// Finder, so the window the user is supposed to act on ends up buried behind
 /// everything. `open -a Finder` activates it through LaunchServices — no
 /// AppleScript, so no "wants to control Finder" permission prompt.
@@ -652,13 +677,13 @@ pub fn relaunch() {
 /// `[package.metadata.bundle] identifier` in Cargo.toml (a test guards
 /// the pair).
 #[cfg(target_os = "macos")]
-const BUNDLE_ID: &str = "com.bigtree.zedis";
+const BUNDLE_ID: &str = crate::constants::BUNDLE_ID;
 
 /// The bundle's name, on the DMG and on disk.
 #[cfg(target_os = "macos")]
-const BUNDLE_NAME: &str = "Zedis.app";
+const BUNDLE_NAME: &str = "GPUI Starter.app";
 
-/// The bundle this process runs from — `…/Zedis.app` for the installed
+/// The bundle this process runs from — `…/GPUI Starter.app` for the installed
 /// app, `None` under bare `cargo run`. `current_exe` reports the path
 /// recorded at exec time, so after an in-place install it names the *new*
 /// copy at the same location — exactly what a relaunch wants, and why
@@ -704,7 +729,7 @@ fn replace_bundle(target: &Path, volume: &Path) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let aside = std::env::temp_dir().join(format!("zedis-previous-{}-{stamp}.app", std::process::id()));
+    let aside = std::env::temp_dir().join(format!("gpui-starter-previous-{}-{stamp}.app", std::process::id()));
     std::fs::rename(target, &aside).map_err(|e| Error::Invalid {
         message: format!("could not move the old bundle aside: {e}"),
     })?;
@@ -752,7 +777,7 @@ fn attach(dmg: &Path) -> Result<PathBuf> {
 
 /// The `mount-point` string out of `hdiutil attach -plist` — the one
 /// value needed, scanned without a plist parser. The volume name is ours
-/// and ASCII ("Zedis Installer"), so XML entity escapes cannot occur in
+/// and ASCII ("GPUI Starter Installer"), so XML entity escapes cannot occur in
 /// the value.
 #[cfg(target_os = "macos")]
 fn mount_point_from_plist(xml: &str) -> Option<PathBuf> {
@@ -878,12 +903,12 @@ mod tests {
     <key>content-hint</key><string>Apple_HFS</string>
     <key>dev-entry</key><string>/dev/disk5s1</string>
     <key>mount-point</key>
-    <string>/Volumes/Zedis Installer</string>
+    <string>/Volumes/GPUI Starter Installer</string>
   </dict>
 </array></dict></plist>"#;
         assert_eq!(
             mount_point_from_plist(xml),
-            Some(PathBuf::from("/Volumes/Zedis Installer"))
+            Some(PathBuf::from("/Volumes/GPUI Starter Installer"))
         );
         assert_eq!(mount_point_from_plist("<plist></plist>"), None);
     }
@@ -892,20 +917,23 @@ mod tests {
     #[test]
     fn bundle_root_is_the_app_directory_or_nothing() {
         assert_eq!(
-            bundle_root_of(Path::new("/Applications/Zedis.app/Contents/MacOS/Zedis")),
-            Some(PathBuf::from("/Applications/Zedis.app"))
+            bundle_root_of(Path::new("/Applications/GPUI Starter.app/Contents/MacOS/gpui-starter")),
+            Some(PathBuf::from("/Applications/GPUI Starter.app"))
         );
         // Bare `cargo run` has no bundle to replace.
-        assert_eq!(bundle_root_of(Path::new("/Users/x/proj/target/debug/zedis")), None);
+        assert_eq!(
+            bundle_root_of(Path::new("/Users/x/proj/target/debug/gpui-starter")),
+            None
+        );
     }
 
-    /// Build a DMG whose payload is `Zedis.app` carrying `id` as its
+    /// Build a DMG whose payload is `GPUI Starter.app` carrying `id` as its
     /// bundle identifier, under `dir`. Real hdiutil, ~a second.
     #[cfg(target_os = "macos")]
     fn fixture_dmg(dir: &Path, id: &str, marker: &[u8], volname: &str) -> PathBuf {
         let contents = dir.join("payload").join(BUNDLE_NAME).join("Contents");
         std::fs::create_dir_all(contents.join("MacOS")).expect("mkdir");
-        std::fs::write(contents.join("MacOS/Zedis"), marker).expect("write binary");
+        std::fs::write(contents.join("MacOS/gpui-starter"), marker).expect("write binary");
         std::fs::write(
             contents.join("Info.plist"),
             format!(
@@ -935,7 +963,7 @@ mod tests {
     fn fixture_target(dir: &Path) -> PathBuf {
         let target = dir.join("Applications").join(BUNDLE_NAME);
         std::fs::create_dir_all(target.join("Contents/MacOS")).expect("mkdir target");
-        std::fs::write(target.join("Contents/MacOS/Zedis"), b"old build").expect("write old");
+        std::fs::write(target.join("Contents/MacOS/gpui-starter"), b"old build").expect("write old");
         target
     }
 
@@ -945,17 +973,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn in_place_install_swaps_the_bundle_and_detaches() {
-        let dir = std::env::temp_dir().join(format!("zedis-inplace-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gpui-starter-inplace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let volname = "zedis-inplace-test";
+        let volname = "gpui-starter-inplace-test";
         let dmg = fixture_dmg(&dir, BUNDLE_ID, b"new build", volname);
         let target = fixture_target(&dir);
 
         install_over(&target, &dmg).expect("in-place install");
 
         assert_eq!(
-            std::fs::read(target.join("Contents/MacOS/Zedis")).expect("read new"),
+            std::fs::read(target.join("Contents/MacOS/gpui-starter")).expect("read new"),
             b"new build"
         );
         assert!(
@@ -964,7 +992,7 @@ mod tests {
         );
         // The old bundle was parked in temp, not destroyed — the running
         // process may still fault pages in from it.
-        let prefix = format!("zedis-previous-{}-", std::process::id());
+        let prefix = format!("gpui-starter-previous-{}-", std::process::id());
         let parked: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
             .into_iter()
             .flatten()
@@ -979,7 +1007,7 @@ mod tests {
         assert!(
             parked
                 .iter()
-                .any(|p| std::fs::read(p.join("Contents/MacOS/Zedis")).is_ok_and(|bytes| bytes == b"old build")),
+                .any(|p| std::fs::read(p.join("Contents/MacOS/gpui-starter")).is_ok_and(|bytes| bytes == b"old build")),
             "the old bundle must survive in temp"
         );
         for p in parked {
@@ -993,10 +1021,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_foreign_bundle_is_refused_before_anything_moves() {
-        let dir = std::env::temp_dir().join(format!("zedis-foreign-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gpui-starter-foreign-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let volname = "zedis-foreign-test";
+        let volname = "gpui-starter-foreign-test";
         let dmg = fixture_dmg(&dir, "com.example.stranger", b"impostor", volname);
         let target = fixture_target(&dir);
 
@@ -1004,7 +1032,7 @@ mod tests {
 
         assert!(refused.is_err(), "a foreign identifier must be refused");
         assert_eq!(
-            std::fs::read(target.join("Contents/MacOS/Zedis")).expect("read old"),
+            std::fs::read(target.join("Contents/MacOS/gpui-starter")).expect("read old"),
             b"old build",
             "the standing install must be untouched"
         );
@@ -1031,13 +1059,13 @@ mod tests {
     fn api_assets_are_read_off_the_release_file_names() {
         let assets = vec![
             GithubAsset {
-                name: "zedis-macos-aarch64.dmg".into(),
-                browser_download_url: "https://x/zedis-macos-aarch64.dmg".into(),
+                name: "gpui-starter-macos-aarch64.dmg".into(),
+                browser_download_url: "https://x/gpui-starter-macos-aarch64.dmg".into(),
                 size: 10,
             },
             GithubAsset {
-                name: "zedis-windows-x86_64.msi".into(),
-                browser_download_url: "https://x/zedis-windows-x86_64.msi".into(),
+                name: "gpui-starter-windows-x86_64.msi".into(),
+                browser_download_url: "https://x/gpui-starter-windows-x86_64.msi".into(),
                 size: 20,
             },
             GithubAsset {

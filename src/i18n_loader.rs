@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,10 +21,9 @@
 //! embedded via rust-embed (compressed in release builds) and served by
 //! [`LazyLocaleBackend`], which decompresses and parses **one locale at a
 //! time, on first lookup**: startup only lists the embedded file names, and a
-//! user running in `zh` never pays to inflate the other seven locales (the
-//! `en` fallback is parsed only if a key actually misses). This trades a
-//! first-lookup parse of the active locale for a smaller binary and a smaller
-//! resident set, with zero loss of translations.
+//! user running in `zh` never pays to inflate `en` unless a key actually
+//! misses. This trades a first-lookup parse of the active locale for a
+//! smaller binary and a smaller resident set, with zero loss of translations.
 //!
 //! The TOML -> flat-key transformation mirrors rust-i18n's own `flatten_keys`
 //! / v1 parsing (`rust-i18n-support`), so existing `t!("section.key")` lookups
@@ -157,26 +156,20 @@ mod tests {
     fn loads_flattens_and_resolves_locales() {
         let backend = runtime_backend();
 
-        // All eight shipped locales are present.
+        // Both shipped locales are present.
         let locales = backend.available_locales();
-        assert_eq!(locales.len(), 8, "expected 8 locales, got {locales:?}");
-        for lang in ["en", "zh", "de", "es", "fr", "ja", "pt", "ru"] {
+        assert_eq!(locales.len(), 2, "expected 2 locales, got {locales:?}");
+        for lang in ["en", "zh"] {
             assert!(locales.iter().any(|l| l.as_ref() == lang), "missing locale {lang}");
         }
 
         // A `[section]` table flattens to the dotted `section.key` form the
         // `t!("section.key")` call sites expect.
-        assert_eq!(
-            backend.translate("en", "status_bar.module_not_loaded").as_deref(),
-            Some("module not loaded")
-        );
+        assert_eq!(backend.translate("en", "sidebar.home").as_deref(), Some("Home"));
         // Native (non-English) values resolve, not just the fallback.
-        assert_eq!(
-            backend.translate("zh", "status_bar.module_not_loaded").as_deref(),
-            Some("模块未加载")
-        );
+        assert_eq!(backend.translate("zh", "sidebar.home").as_deref(), Some("首页"));
         // Unknown keys return None so the `fallback = "en"` chain can engage.
-        assert!(backend.translate("en", "status_bar.__does_not_exist__").is_none());
+        assert!(backend.translate("en", "sidebar.__does_not_exist__").is_none());
     }
 
     #[test]
@@ -191,7 +184,7 @@ mod tests {
         );
 
         // Looking up a `zh` key inflates `zh` and nothing else.
-        assert!(backend.translate("zh", "status_bar.module_not_loaded").is_some());
+        assert!(backend.translate("zh", "sidebar.home").is_some());
         for (name, cell) in &backend.locales {
             assert_eq!(
                 cell.get().is_some(),

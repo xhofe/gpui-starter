@@ -12,11 +12,11 @@ on:
 env:
   # Baked into the binaries (startup::BUILD_CHANNEL): the rolling build from
   # main follows the pre-release update channel by default.
-  ZEDIS_BUILD_CHANNEL: ${{ github.ref == 'refs/heads/main' && 'nightly' || 'stable' }}
+  GPUI_STARTER_BUILD_CHANNEL: ${{ github.ref == 'refs/heads/main' && 'nightly' || 'stable' }}
   GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.98.0
-  APP_NAME: Zedis
+  APP_NAME: "GPUI Starter"
 
 jobs:
   prepare_vars:
@@ -160,14 +160,14 @@ jobs:
       - name: release
         run: cargo bundle --release --target ${{ matrix.target }} --features mimalloc
       - name: smoke test (first frame must paint)
-        # Boots the real binary in ZEDIS_SMOKE_TEST mode: exit 0 once the
+        # Boots the real binary in GPUI_STARTER_SMOKE_TEST mode: exit 0 once the
         # first frame paints, exit 2 if none does within 30s — the failure
         # mode of the 0.4.5/0.4.6 "window never appears" regression.
         timeout-minutes: 3
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config
-        run: ./target/${{ matrix.target }}/release/zedis
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config
+        run: ./target/${{ matrix.target }}/release/gpui-starter
       - name: sign app
         env:
           CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
@@ -301,11 +301,11 @@ jobs:
           # --locked + pin: see the cargo-bundle note in the macos job.
           cargo install --locked cargo-wix@0.3.9
           cargo build --release --target ${{ matrix.target }} --features mimalloc
-          cp target/${{ matrix.target }}/release/zedis.exe ./zedis.exe
+          cp target/${{ matrix.target }}/release/gpui-starter.exe ./gpui-starter.exe
 
-          cargo wix --nocapture --no-build -p zedis-gui --target ${{ matrix.target }}
+          cargo wix --nocapture --no-build -p gpui-starter --target ${{ matrix.target }}
           ls target/wix/*
-          mv target/wix/zedis-*.msi ./zedis.msi
+          mv target/wix/gpui-starter-*.msi ./gpui-starter.msi
       - name: smoke test (first frame must paint)
         # x86_64 only: the aarch64 build is cross-compiled and cannot run on
         # this runner. GUI-subsystem exes detach from the shell, so
@@ -317,10 +317,10 @@ jobs:
         timeout-minutes: 3
         shell: pwsh
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config
         run: |
-          $p = Start-Process -FilePath .\zedis.exe -Wait -PassThru
+          $p = Start-Process -FilePath .\gpui-starter.exe -Wait -PassThru
           if ($p.ExitCode -ne 0) {
             Write-Error "smoke test failed: exit code $($p.ExitCode)"
             exit 1
@@ -330,19 +330,19 @@ jobs:
         shell: powershell
         run: |
           ls .
-          $zipName = "zedis-windows-${{ matrix.suffix }}.zip"
-          Compress-Archive -Path zedis.exe -Destination $zipName
+          $zipName = "gpui-starter-windows-${{ matrix.suffix }}.zip"
+          Compress-Archive -Path gpui-starter.exe -Destination $zipName
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
           # Bare .msi: consumed by winget (InstallerUrl) and by the in-app
           # updater, which hands the download to `start` — a zip there would
           # open Explorer instead of running the installer.
-          $msiName = "zedis-windows-${{ matrix.suffix }}.msi"
-          Copy-Item zedis.msi $msiName
+          $msiName = "gpui-starter-windows-${{ matrix.suffix }}.msi"
+          Copy-Item gpui-starter.msi $msiName
           echo "MSI_NAME=$msiName" >> $env:GITHUB_ENV
 
-          $msiZipName = "zedis-windows-${{ matrix.suffix }}.msi.zip"
-          Compress-Archive -Path zedis.msi -Destination $msiZipName
+          $msiZipName = "gpui-starter-windows-${{ matrix.suffix }}.msi.zip"
+          Compress-Archive -Path gpui-starter.msi -Destination $msiZipName
           echo "MSI_ZIP_NAME=$msiZipName" >> $env:GITHUB_ENV
       - name: checksum (windows)
         if: startsWith(github.ref, 'refs/tags/')
@@ -451,20 +451,20 @@ jobs:
           # `mv` below empties target/release. Metadata (name, desktop entry,
           # icons, dependency resolution) lives in [package.metadata.deb] /
           # [package.metadata.generate-rpm] in Cargo.toml.
-          cargo deb -p zedis-gui --no-build -o ./zedis-linux-${{ matrix.suffix }}.deb
-          cargo generate-rpm -o ./zedis-linux-${{ matrix.suffix }}.rpm
-          mv target/release/zedis ./zedis
-          chmod +x zedis
-          objdump -p ./zedis | grep GLIBC
-          tar -czvf zedis-linux-${{ matrix.suffix }}.tar.gz zedis
+          cargo deb -p gpui-starter --no-build -o ./gpui-starter-linux-${{ matrix.suffix }}.deb
+          cargo generate-rpm -o ./gpui-starter-linux-${{ matrix.suffix }}.rpm
+          mv target/release/gpui-starter ./gpui-starter
+          chmod +x gpui-starter
+          objdump -p ./gpui-starter | grep GLIBC
+          tar -czvf gpui-starter-linux-${{ matrix.suffix }}.tar.gz gpui-starter
           cargo appimage --features mimalloc
-          mv target/appimage/zedis.AppImage ./zedis.AppImage
-          tar -czvf zedis-${{ matrix.suffix }}.AppImage.tar.gz zedis.AppImage
+          mv target/appimage/gpui-starter.AppImage ./gpui-starter.AppImage
+          tar -czvf gpui-starter-${{ matrix.suffix }}.AppImage.tar.gz gpui-starter.AppImage
       - name: smoke test (first frame must paint)
         # Best-effort, NOT a hard gate. History: this was flipped to a hard
         # gate on the belief that "recent runs have been consistently
         # green" — but those greens were this very continue-on-error
-        # swallowing ZEDIS_SMOKE_TIMEOUT (verified in the v0.5.4 job logs:
+        # swallowing GPUI_STARTER_SMOKE_TIMEOUT (verified in the v0.5.4 job logs:
         # the smoke never once passed under Xvfb + llvmpipe; the
         # frame-present signal simply never arrives there, even with
         # redraws forced every second). Every nightly since the hard gate
@@ -474,21 +474,21 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config
         run: |
           sudo apt-get install -y xvfb mesa-vulkan-drivers libvulkan1
-          xvfb-run -a ./zedis
+          xvfb-run -a ./gpui-starter
       - name: checksum (linux)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           mkdir -p meta
           : > "meta/linux-${{ matrix.suffix }}.txt"
           for entry in \
-            "zedis-linux-${{ matrix.suffix }}.tar.gz tarball" \
-            "zedis-${{ matrix.suffix }}.AppImage.tar.gz appimage" \
-            "zedis-linux-${{ matrix.suffix }}.deb deb" \
-            "zedis-linux-${{ matrix.suffix }}.rpm rpm"; do
+            "gpui-starter-linux-${{ matrix.suffix }}.tar.gz tarball" \
+            "gpui-starter-${{ matrix.suffix }}.AppImage.tar.gz appimage" \
+            "gpui-starter-linux-${{ matrix.suffix }}.deb deb" \
+            "gpui-starter-linux-${{ matrix.suffix }}.rpm rpm"; do
             set -- $entry
             f="$1"; kind="$2"
             sha="$(sha256sum "$f" | awk '{print $1}')"
@@ -504,10 +504,10 @@ jobs:
       - name: upload asset
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          ./.github/workflows/upload_asset.sh "./zedis-linux-${{ matrix.suffix }}.tar.gz" "$GITHUB_TOKEN"
-          ./.github/workflows/upload_asset.sh "./zedis-${{ matrix.suffix }}.AppImage.tar.gz" "$GITHUB_TOKEN"
-          ./.github/workflows/upload_asset.sh "./zedis-linux-${{ matrix.suffix }}.deb" "$GITHUB_TOKEN"
-          ./.github/workflows/upload_asset.sh "./zedis-linux-${{ matrix.suffix }}.rpm" "$GITHUB_TOKEN"
+          ./.github/workflows/upload_asset.sh "./gpui-starter-linux-${{ matrix.suffix }}.tar.gz" "$GITHUB_TOKEN"
+          ./.github/workflows/upload_asset.sh "./gpui-starter-${{ matrix.suffix }}.AppImage.tar.gz" "$GITHUB_TOKEN"
+          ./.github/workflows/upload_asset.sh "./gpui-starter-linux-${{ matrix.suffix }}.deb" "$GITHUB_TOKEN"
+          ./.github/workflows/upload_asset.sh "./gpui-starter-linux-${{ matrix.suffix }}.rpm" "$GITHUB_TOKEN"
       - name: Release Nightly Assets
         # main pushes only — a tag push must not overwrite the nightly
         # release with stable-build artifacts.
@@ -528,7 +528,7 @@ jobs:
   # Aggregate every platform's per-asset hashes into a single SHA256SUMS plus a
   # latest.json update manifest, and attach both to the tagged release. The
   # in-app updater fetches latest.json (served from the always-current
-  # https://github.com/vicanso/zedis/releases/latest/download/latest.json),
+  # https://github.com/xhofe/gpui-starter/releases/latest/download/latest.json),
   # picks the asset for its os/arch, and verifies the download against SHA256SUMS.
   checksums:
     needs: [macos, windows, linux]
@@ -547,7 +547,7 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
-          REPO="vicanso/zedis"
+          REPO="xhofe/gpui-starter"
           BASE="https://github.com/$REPO/releases/download/$TAG"
           cat meta/*.txt > all-meta.txt
           echo "Collected assets:"; cat all-meta.txt

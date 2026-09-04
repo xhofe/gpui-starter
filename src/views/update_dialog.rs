@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,26 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Action area of the "update available" dialog: the Skip / Download buttons
-//! before a download, the live progress bar during one — and, after a macOS
-//! in-place install, the Restart / Later row. That last state lives *here*
-//! rather than in a second dialog on purpose: this dialog dismisses itself
-//! with a deferred `close_dialog`, which closes the **topmost** dialog — a
-//! separate restart dialog opened in the same frame would be the topmost and
-//! get eaten by that close (it happened).
-//!
-//! It is a view (not a plain closure) because the progress has to be *live*:
-//! `ZedisDialog::child` / `footer_child` take a `Fn() -> impl IntoElement` with
-//! no `cx`, so they cannot read the store. As an entity this subscribes to
-//! `GlobalEvent::UpdateDownloadProgress` and repaints itself in place, so the
-//! bar advances while the dialog stays up.
-//!
-//! It goes in the dialog **footer**, not at the end of the body: the body is the
-//! dialog's scroll container, so a long changelog would push the buttons below
-//! the fold (they were unreachable when this lived in the body). The footer is a
-//! sibling of that container and always visible.
+//! Action area of the "update available" dialog.
 
-use crate::states::{GlobalEvent, ZedisGlobalStore, i18n_update};
+use crate::states::{GlobalEvent, GlobalStore, i18n_update};
 use gpui::{App, Subscription, Window, prelude::*};
 use gpui_kit::component::{
     ActiveTheme, WindowExt,
@@ -45,28 +28,18 @@ use humansize::{DECIMAL, format_size};
 use std::rc::Rc;
 use tracing::debug;
 
-/// Action handed to the dialog by `main.rs` (start the download / skip the
-/// version). Both need `&mut App` to reach the store and the root view.
 pub type DialogCallback = Rc<dyn Fn(&mut Window, &mut App)>;
 
-pub struct ZedisUpdateDialog {
-    /// Starts the download (`Zedis::start_download`); the dialog stays open and
-    /// this row swaps itself for the progress bar.
+pub struct UpdateDialog {
     on_download: DialogCallback,
-    /// Records the skipped version and clears the update chip.
     on_skip: DialogCallback,
-    /// Latched once the download starts, so the render that sees progress go
-    /// back to `None` knows the download *ended* (rather than never having
-    /// begun) and can dismiss the dialog.
     was_downloading: bool,
     _subscriptions: Vec<Subscription>,
 }
 
-impl ZedisUpdateDialog {
+impl UpdateDialog {
     pub fn new(on_download: DialogCallback, on_skip: DialogCallback, cx: &mut Context<Self>) -> Self {
-        // Repaint on every progress tick — this is the whole point of being a
-        // view: the dialog's own render closure can't see the store.
-        let global_state = cx.global::<ZedisGlobalStore>().state();
+        let global_state = cx.global::<GlobalStore>().state();
         let subscription = cx.subscribe(&global_state, |_this, _state, event, cx| {
             if matches!(event, GlobalEvent::UpdateDownloadProgress) {
                 cx.notify();
@@ -81,7 +54,6 @@ impl ZedisUpdateDialog {
         }
     }
 
-    /// Before the download starts: Skip / Download.
     fn render_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let on_download = self.on_download.clone();
         let on_skip = self.on_skip.clone();
@@ -90,7 +62,7 @@ impl ZedisUpdateDialog {
             .justify_end()
             .gap_2()
             .child(
-                Button::new("zedis-update-skip")
+                Button::new("update-skip")
                     .outline()
                     .label(i18n_update(cx, "skip_version"))
                     .on_click(move |_, window, cx| {
@@ -99,20 +71,13 @@ impl ZedisUpdateDialog {
                     }),
             )
             .child(
-                Button::new("zedis-update-download")
+                Button::new("update-download")
                     .primary()
                     .label(i18n_update(cx, "download"))
-                    // Deliberately does NOT close the dialog: this row is
-                    // replaced by the progress bar on the next render.
                     .on_click(move |_, window, cx| on_download(window, cx)),
             )
     }
 
-    /// After a macOS in-place install: the bundle on disk is already the
-    /// new version, the only step left is running it. Restart hands the
-    /// relaunch to a detached shell that reopens the bundle once this
-    /// process exits; Later is fine too — the next manual launch is the
-    /// new version either way.
     fn render_restart(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
@@ -130,23 +95,21 @@ impl ZedisUpdateDialog {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("zedis-update-restart-later")
+                        Button::new("update-restart-later")
                             .outline()
                             .label(i18n_update(cx, "restart_later"))
                             .on_click(|_, window, cx| {
-                                cx.global::<ZedisGlobalStore>().clone().update(cx, |state, cx| {
+                                cx.global::<GlobalStore>().clone().update(cx, |state, cx| {
                                     state.set_update_installed(false, cx);
                                 });
                                 window.close_dialog(cx);
                             }),
                     )
                     .child(
-                        Button::new("zedis-update-restart-now")
+                        Button::new("update-restart-now")
                             .primary()
                             .label(i18n_update(cx, "restart_now"))
                             .on_click(|_, _window, cx| {
-                                // App state is flushed by `flush_app_state_on_quit`,
-                                // which gpui waits on during shutdown.
                                 debug!("update: restarting into the freshly installed bundle");
                                 #[cfg(target_os = "macos")]
                                 crate::helpers::relaunch();
@@ -156,15 +119,13 @@ impl ZedisUpdateDialog {
             )
     }
 
-    /// During the download: bar + percent + transferred bytes. Replaces the
-    /// buttons, so there is nothing to double-click.
     fn render_progress(&self, done: u64, total: u64, cx: &mut Context<Self>) -> impl IntoElement {
         let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
         let muted = cx.theme().muted_foreground;
         v_flex()
             .w_full()
             .gap_1p5()
-            .child(Progress::new("zedis-update-progress").value(pct as f32))
+            .child(Progress::new("update-progress").value(pct as f32))
             .child(
                 h_flex()
                     .w_full()
@@ -183,21 +144,15 @@ impl ZedisUpdateDialog {
     }
 }
 
-impl Render for ZedisUpdateDialog {
+impl Render for UpdateDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (progress, installed) = {
-            let store = cx.global::<ZedisGlobalStore>().read(cx);
+            let store = cx.global::<GlobalStore>().read(cx);
             (store.download_progress(), store.update_installed())
         };
         if progress.is_some() {
             self.was_downloading = true;
         } else if self.was_downloading && !installed {
-            // Progress cleared after a download ran: the installer was handed
-            // to the OS, or the download failed (the toast says so and the
-            // release page opens). Either way the dialog has served its
-            // purpose — dismiss it. Deferred: closing mutates the dialog
-            // layer we are rendering into. An in-place install instead keeps
-            // the dialog up and swaps in the restart row below.
             self.was_downloading = false;
             debug!("update dialog: download settled, closing");
             cx.defer_in(window, |_this, window, cx| window.close_dialog(cx));

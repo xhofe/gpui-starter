@@ -8,7 +8,7 @@ FILE="Cargo.toml"
 
 # 二进制文件的路径
 # 使用 $HOME 替代 ~ 以确保在脚本中稳定展开，并处理路径空格
-BINARY_PATH="$HOME/cargo-target/release/bundle/osx/Zedis.app/Contents/MacOS/Zedis"
+BINARY_PATH="$HOME/cargo-target/release/bundle/osx/GPUI Starter.app/Contents/MacOS/gpui-starter"
 
 # Patch 配置
 # CGSSetWindowBackgroundBlurRadius(私有 API)在 gpui_macos crate 里(经

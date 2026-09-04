@@ -1,0 +1,20 @@
+[package]
+name = "gpui-starter-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords = ["gui", "gpui"]
+description = "A native GUI built with Rust and GPUI."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+exclude = []
+readme = "./README.md"
+rust-version.workspace = true
+
+[dependencies]
+gpui = { workspace = true }
+gpui-kit = { workspace = true }
+indexmap = { workspace = true }

@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One running Zedis per profile.
+//! One running app per profile.
 //!
 //! The local database can only be opened by one process, so a second launch
 //! used to end at the "database locked" recovery window. Now the running
 //! instance listens on a loopback port whose number and a one-time token are
 //! written to `<config_dir>/instance.json`; a second launch reads that file,
-//! hands over its arguments (a `redis://` link, or nothing — "bring the
-//! window up") and exits. The token keeps another local user or process from
+//! focuses the existing window, and exits. The token keeps another local user or process from
 //! steering the app; a stale file (crash, reboot) simply fails to connect,
 //! or connects to something that never answers `OK`, and the new process
 //! becomes the instance.
 
+use super::fs::{get_or_create_config_dir, write_file_atomic};
 use serde::{Deserialize, Serialize};
 use smol::channel::{Receiver, Sender, unbounded};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -33,7 +33,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
-use zedis_core::fs::{get_or_create_config_dir, write_file_atomic};
 
 pub const INSTANCE_FILE: &str = "instance.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -45,7 +44,7 @@ const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct InstanceMessage {
-    /// `redis://` / `rediss://` links from the command line.
+    /// Optional payload from the second launch (unused by the starter).
     pub urls: Vec<String>,
 }
 
@@ -207,7 +206,7 @@ impl InstanceServer {
     /// calling `on_message` (from that thread) for each authenticated one.
     pub fn serve(self, on_message: impl Fn(InstanceMessage) + Send + 'static) {
         let spawned = std::thread::Builder::new()
-            .name("zedis-instance".to_string())
+            .name("gpui-starter-instance".to_string())
             .spawn(move || {
                 for stream in self.listener.incoming() {
                     let Ok(stream) = stream else {
@@ -259,7 +258,7 @@ mod tests {
             let _ = tx.send(message);
         });
         let message = InstanceMessage {
-            urls: vec!["redis://localhost:6379/2".to_string()],
+            urls: vec!["https://example.com".to_string()],
         };
         assert!(forward(addr, "secret", &message));
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("delivered"), message);

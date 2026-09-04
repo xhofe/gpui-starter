@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,6 @@
 
 //! Process-wide date / time rendering preference.
 //!
-//! Every user-facing timestamp (slow log, persistence, monitor clock,
-//! timestamp preview, metrics axis, trash) goes through here, so the
 //! Settings "Time zone" / "Date format" choice applies everywhere at once.
 //! The preference is mirrored into a process-wide slot (like the HTTP
 //! proxy) because several call sites format on background threads or in
@@ -50,23 +48,16 @@ impl TimeZonePref {
         }
     }
 
-    /// Short label for the timestamp preview ("Local: …" / "UTC: …").
+    /// Short label for the Settings select ("Local" / "UTC").
     pub fn label(self) -> &'static str {
         match self {
             TimeZonePref::Local => "Local",
             TimeZonePref::Utc => "UTC",
         }
     }
-
-    fn other(self) -> Self {
-        match self {
-            TimeZonePref::Local => TimeZonePref::Utc,
-            TimeZonePref::Utc => TimeZonePref::Local,
-        }
-    }
 }
 
-/// One selectable date + time layout. `id` is what `zedis.toml` stores.
+/// One selectable date + time layout. `id` is what `gpui-starter.toml` stores.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DateFormat {
     pub id: &'static str,
@@ -75,7 +66,7 @@ pub struct DateFormat {
 }
 
 /// The selectable layouts, in the order the Settings select lists them.
-/// The first entry is the default and matches what Zedis always rendered.
+/// The first entry is the default.
 pub const DATE_FORMATS: &[DateFormat] = &[
     DateFormat {
         id: "iso",
@@ -100,12 +91,6 @@ pub const DATE_FORMATS: &[DateFormat] = &[
 ];
 
 pub const DEFAULT_DATE_FORMAT: &str = "iso";
-
-/// The clock pattern used by the live panels (monitor, keyspace events,
-/// INFO "taken at"), with and without milliseconds. Independent of the
-/// date layout: a clock column has no date to lay out.
-const CLOCK_PATTERN: &str = "%H:%M:%S";
-const CLOCK_MILLIS_PATTERN: &str = "%H:%M:%S%.3f";
 
 /// Resolve a stored id, falling back to the default for an unknown one
 /// (an older / hand-edited config).
@@ -152,11 +137,6 @@ fn current() -> (TimeZonePref, &'static DateFormat) {
     (prefs.zone, prefs.format)
 }
 
-/// The configured zone (for callers that label their output with it).
-pub fn configured_time_zone() -> TimeZonePref {
-    current().0
-}
-
 fn render<Tz: TimeZone>(dt: &DateTime<Tz>, zone: TimeZonePref, pattern: &str) -> String {
     match zone {
         TimeZonePref::Local => dt.with_timezone(&Local).format(pattern).to_string(),
@@ -170,45 +150,22 @@ pub fn format_datetime<Tz: TimeZone>(dt: &DateTime<Tz>) -> String {
     render(dt, zone, format.pattern)
 }
 
-/// Full date + time in an explicit zone but the configured layout — the
-/// timestamp preview shows the instant in both zones.
-pub fn format_datetime_in<Tz: TimeZone>(dt: &DateTime<Tz>, zone: TimeZonePref) -> String {
-    render(dt, zone, current().1.pattern)
-}
-
-/// The instant in the zone the user did *not* pick, labelled — the second
-/// line of the timestamp preview.
-pub fn format_datetime_other_zone<Tz: TimeZone>(dt: &DateTime<Tz>) -> (&'static str, String) {
-    let other = configured_time_zone().other();
-    (other.label(), format_datetime_in(dt, other))
-}
-
 /// Unix seconds → configured date + time; `None` when out of chrono's range.
 pub fn format_unix_secs(ts: i64) -> Option<String> {
     DateTime::from_timestamp(ts, 0).map(|dt| format_datetime(&dt))
 }
 
-/// Unix milliseconds rendered with an explicit pattern in the configured
-/// zone — chart axis ticks and other short forms that keep their own layout.
-pub fn format_unix_millis_with(ms: i64, pattern: &str) -> Option<String> {
-    DateTime::from_timestamp_millis(ms).map(|dt| render(&dt, configured_time_zone(), pattern))
-}
-
-/// Time of day (`HH:MM:SS`, optionally with milliseconds) in the
-/// configured zone, for the live panels' clock columns.
-pub fn format_clock<Tz: TimeZone>(dt: &DateTime<Tz>, millis: bool) -> String {
-    let pattern = if millis { CLOCK_MILLIS_PATTERN } else { CLOCK_PATTERN };
-    render(dt, configured_time_zone(), pattern)
-}
-
-/// The current time of day in the configured zone.
-pub fn now_clock(millis: bool) -> String {
-    format_clock(&Utc::now(), millis)
-}
-
 /// The current date + time in the configured zone and layout.
 pub fn now_datetime() -> String {
     format_datetime(&Utc::now())
+}
+
+/// Unix seconds, or 0 if the system clock is before the epoch.
+pub fn unix_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -230,16 +187,6 @@ mod tests {
         // 2026-03-04T15:06:07Z
         let ts = 1_772_636_767;
         assert_eq!(format_unix_secs(ts).as_deref(), Some("2026-03-04T15:06:07+00:00"));
-        assert_eq!(
-            format_unix_millis_with(ts * 1000, "%m-%d %H:%M").as_deref(),
-            Some("03-04 15:06")
-        );
-        let dt = DateTime::from_timestamp(ts, 250_000_000).expect("in range");
-        assert_eq!(format_clock(&dt, true), "15:06:07.250");
-        assert_eq!(format_clock(&dt, false), "15:06:07");
-        let (label, other) = format_datetime_other_zone(&dt);
-        assert_eq!(label, "Local");
-        assert_eq!(other, format_datetime_in(&dt, TimeZonePref::Local));
         set_datetime_prefs(TimeZonePref::Local, DEFAULT_DATE_FORMAT);
     }
 

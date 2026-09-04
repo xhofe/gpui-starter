@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,451 +12,66 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::helpers::{
-    DiagnosticsAction, MemuAction, MultiSearchAction, PaletteAction, ShortcutsAction, UpdateAction,
-    get_mono_font_family, is_app_store_build,
-};
-use crate::{
-    assets::CustomIconName,
-    connection::get_server,
-    states::{
-        GlobalEvent, LocaleAction, Route, SelectThemeAction, SettingsAction, ThemeAction, ZedisGlobalStore,
-        i18n_shortcuts, i18n_sidebar, i18n_status_bar,
-    },
-};
-use gpui::{
-    Anchor, App, Context, Decorations, Hsla, MouseButton, SharedString, Subscription, Window, div, prelude::*, px, rgb,
-};
+use crate::constants::APP_NAME;
+use crate::helpers::{DiagnosticsAction, UpdateAction, is_app_store_build};
+use crate::states::{GlobalStore, i18n_sidebar, i18n_update};
+use crate::views::open_about_window;
+use gpui::{App, Window, div, prelude::*};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, StyledExt, TITLE_BAR_HEIGHT, ThemeMode, ThemeRegistry, TitleBar,
+    IconName, TitleBar as KitTitleBar,
     button::{Button, ButtonVariants},
     h_flex,
     label::Label,
-    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
-    tooltip::Tooltip,
 };
 
-/// Centered title-bar identity for the active connection (hidden on Home).
-struct TitleBarServerInfo {
-    name: SharedString,
-    host: SharedString,
-    db: usize,
-    /// High-risk (PROD) chip — only set when `is_high_risk_tag()`.
-    prod_label: Option<SharedString>,
-}
+pub struct TitleBar;
 
-pub struct ZedisTitleBar {
-    _subscriptions: Vec<Subscription>,
-}
-
-impl ZedisTitleBar {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Re-render whenever the active server changes (selection,
-        // clear, or a rename via the server list) so the centered
-        // title stays in sync.
-        let global_state = cx.global::<ZedisGlobalStore>().state();
-        let subscription = cx.subscribe(&global_state, |_this, _global_state, event, cx| {
-            if matches!(
-                event,
-                GlobalEvent::ServerSelected(..)
-                    | GlobalEvent::ServerListUpdated
-                    | GlobalEvent::RouteChanged(..)
-                    | GlobalEvent::UpdateAvailable
-                    | GlobalEvent::UpdateDownloadProgress
-            ) {
-                cx.notify();
-            }
-        });
-
-        Self {
-            _subscriptions: vec![subscription],
-        }
-    }
-
-    /// Resolve the active connection's title-bar identity, if any.
-    ///
-    /// The selected server is persisted across restarts, but the Home
-    /// page is a server-agnostic chooser — showing the previously
-    /// selected name there is misleading, so hide it on `Route::Home`.
-    fn selected_server_info(cx: &App) -> Option<TitleBarServerInfo> {
-        let state = cx.global::<ZedisGlobalStore>().read(cx);
-        if state.route() == Route::Home {
-            return None;
-        }
-        let (server_id, db) = state.selected_server()?.clone();
-        let server = get_server(&server_id).ok()?;
-        // `host:port` — the name is user-chosen and may not say which real
-        // instance it is; the address confirms the actual target.
-        let host = SharedString::from(format!("{}:{}", server.host, server.port));
-        // PROD / high-risk only — Dev/UAT stay in the status bar so the
-        // title bar doesn't grow a chip on every low-risk connection.
-        let prod_label = if server.is_high_risk_tag() {
-            Some(
-                server
-                    .tag_label()
-                    .map(|s| SharedString::from(s.to_string()))
-                    .unwrap_or_else(|| SharedString::from("PROD")),
-            )
-        } else {
-            None
-        };
-        Some(TitleBarServerInfo {
-            name: SharedString::from(server.name),
-            host,
-            db,
-            prod_label,
-        })
-    }
-
-    fn render_settings_menu(this: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
-        // Theme: appearance mode (light / dark / follow-system) followed by the
-        // registered color themes, all in one submenu so the top-level menu
-        // stays short. None of light/dark/system is checked while a named theme
-        // overrides the mode; the registry's built-in default light/dark are
-        // skipped because light/dark already select them.
-        let this = this
-            // Header: app name + version, like Zed's account menu. Disabled so
-            // it reads as a title rather than a clickable row.
-            .item(
-                PopupMenuItem::element(|_window, _cx| {
-                    Label::new(concat!("Zedis v", env!("CARGO_PKG_VERSION"))).font_semibold()
-                })
-                .disabled(true),
-            )
-            .separator()
-            .label(i18n_sidebar(cx, "preferences"))
-            .submenu_with_icon(
-                Some(Icon::new(CustomIconName::SwatchBook)),
-                i18n_sidebar(cx, "theme"),
-                window,
-                cx,
-                |submenu, _window, cx| {
-                    let store = cx.global::<ZedisGlobalStore>().read(cx);
-                    let has_named_theme = store.theme_name().is_some();
-                    let theme = store.theme();
-                    let current = store.theme_name();
-                    let light_checked = !has_named_theme && theme == Some(ThemeMode::Light);
-                    let dark_checked = !has_named_theme && theme == Some(ThemeMode::Dark);
-                    let system_checked = !has_named_theme && theme.is_none();
-                    let mut submenu = submenu
-                        .menu_element_with_check(light_checked, Box::new(ThemeAction::Light), |_, cx| {
-                            Label::new(i18n_sidebar(cx, "light"))
-                        })
-                        .menu_element_with_check(dark_checked, Box::new(ThemeAction::Dark), |_, cx| {
-                            Label::new(i18n_sidebar(cx, "dark"))
-                        })
-                        .menu_element_with_check(system_checked, Box::new(ThemeAction::System), |_, cx| {
-                            Label::new(i18n_sidebar(cx, "system"))
-                        })
-                        .separator();
-                    let registry = ThemeRegistry::global(cx);
-                    let default_light = registry.default_light_theme().name.clone();
-                    let default_dark = registry.default_dark_theme().name.clone();
-                    for config in registry.sorted_themes() {
-                        let name = config.name.clone();
-                        if name == default_light || name == default_dark {
-                            continue;
-                        }
-                        let checked = current.as_deref() == Some(&*name);
-                        let action = Box::new(SelectThemeAction { name: name.to_string() });
-                        submenu =
-                            submenu.menu_element_with_check(checked, action, move |_, _cx| Label::new(name.clone()));
-                    }
-                    submenu
-                },
-            )
-            // Language: pick the UI locale. Native names so each stays
-            // recognizable regardless of the current language; active one checked.
-            .submenu_with_icon(
-                Some(Icon::new(CustomIconName::Languages)),
-                i18n_sidebar(cx, "language"),
-                window,
-                cx,
-                |submenu, _window, cx| {
-                    let current = cx.global::<ZedisGlobalStore>().read(cx).locale().to_string();
-                    let mut submenu = submenu;
-                    for (action, code, name) in [
-                        (LocaleAction::En, "en", "English"),
-                        (LocaleAction::Zh, "zh", "中文"),
-                        (LocaleAction::Ru, "ru", "Русский"),
-                        (LocaleAction::Ja, "ja", "日本語"),
-                        (LocaleAction::Pt, "pt", "Português"),
-                        (LocaleAction::Es, "es", "Español"),
-                        (LocaleAction::De, "de", "Deutsch"),
-                        (LocaleAction::Fr, "fr", "Français"),
-                    ] {
-                        let checked = current == code;
-                        submenu =
-                            submenu.menu_element_with_check(checked, Box::new(action), move |_, _cx| Label::new(name));
-                    }
-                    submenu
-                },
-            );
-
-        this.separator()
-            // App actions, shown with their shortcuts (Zed-style flat items).
-            .menu_with_icon(
-                i18n_sidebar(cx, "command_palette"),
-                Icon::new(CustomIconName::Command),
-                Box::new(PaletteAction::Toggle),
-            )
-            // Multi-database search (⌘⇧F): the only global overlay without a
-            // click entry — surfaced here beside the palette for parity and
-            // discoverability. Label reuses the shortcuts-panel string.
-            .menu_with_icon(
-                i18n_shortcuts(cx, "multi_search"),
-                Icon::new(IconName::Search),
-                Box::new(MultiSearchAction::Toggle),
-            )
-            .menu_with_icon(
-                i18n_sidebar(cx, "keyboard_shortcuts"),
-                Icon::new(CustomIconName::Keyboard),
-                Box::new(ShortcutsAction::Toggle),
-            )
-            .separator()
-            // Settings: the configuration sub-views, grouped into one submenu so
-            // the top-level menu stays short.
-            .submenu_with_icon(
-                Some(Icon::new(IconName::Settings2)),
-                i18n_sidebar(cx, "settings"),
-                window,
-                cx,
-                |submenu, _window, _cx| {
-                    submenu
-                        .menu_element_with_icon(
-                            Icon::new(CustomIconName::SwatchBook),
-                            Box::new(SettingsAction::Protos),
-                            move |_window, cx| Label::new(i18n_sidebar(cx, "proto_settings")),
-                        )
-                        .menu_element_with_icon(
-                            Icon::new(CustomIconName::Binary),
-                            Box::new(SettingsAction::Scripts),
-                            move |_window, cx| Label::new(i18n_sidebar(cx, "script_settings")),
-                        )
-                        .menu_element_with_icon(
-                            Icon::new(IconName::Settings2),
-                            Box::new(SettingsAction::Editor),
-                            move |_window, cx| Label::new(i18n_sidebar(cx, "other_settings")),
-                        )
-                },
-            )
-            // App Store builds update via the App Store — hide the manual check.
-            .when(!is_app_store_build(), |this| {
-                this.menu_with_icon(
-                    i18n_sidebar(cx, "check_updates"),
-                    Icon::new(CustomIconName::RefreshCw),
-                    Box::new(UpdateAction::Check),
-                )
-            })
-            .menu_with_icon(
-                i18n_sidebar(cx, "open_logs"),
-                Icon::new(CustomIconName::HardDrive),
-                Box::new(MemuAction::OpenLogs),
-            )
-            .menu_with_icon(
-                i18n_sidebar(cx, "export_diagnostics"),
-                Icon::new(CustomIconName::Download),
-                Box::new(DiagnosticsAction::Export),
-            )
-            .menu_with_icon(
-                i18n_sidebar(cx, "about"),
-                Icon::new(IconName::Info),
-                Box::new(MemuAction::About),
-            )
-            .separator()
-            .menu_with_icon(
-                i18n_sidebar(cx, "quit"),
-                Icon::new(CustomIconName::Power),
-                Box::new(MemuAction::Quit),
-            )
+impl TitleBar {
+    pub fn new(_cx: &mut App) -> Self {
+        Self
     }
 }
 
-impl Render for ZedisTitleBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // right actions container
-        let right_actions = h_flex().flex_1().items_center().justify_end().px_2().gap_2().mr_2();
-
-        // App-global: a newer release awaiting action shows a download chip here
-        // (the title bar is always visible, so the update check can run on
-        // startup regardless of route). While downloading it shows the percent.
-        let update_version = cx.global::<ZedisGlobalStore>().read(cx).available_update_version();
-        let download_progress = cx.global::<ZedisGlobalStore>().read(cx).download_percent();
-        // True while re-checking on click — the chip shows a loading spinner.
-        let update_checking = cx.global::<ZedisGlobalStore>().read(cx).update_checking();
-
-        // Centered title: name · host:port · db N · [Prod] (last, soft tint).
-        // Empty on Home / when no server is selected.
-        let muted = cx.theme().muted_foreground;
-        let mono: SharedString = get_mono_font_family().into();
-        // Soft tint only (no border). Status bar keeps the solid magenta fill.
-        let (prod_bg, prod_fg): (Hsla, Hsla) = if cx.theme().is_dark() {
-            (rgb(0x3f1a2e).into(), rgb(0xf9a8d4).into())
-        } else {
-            (rgb(0xfdf2f8).into(), rgb(0xbe185d).into())
-        };
-        // A production connection tints the whole bar, not just its chip: the
-        // window itself says where a stray command would land.
-        let is_prod = Self::selected_server_info(cx).is_some_and(|info| info.prod_label.is_some());
-        let center =
+impl Render for TitleBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let checking = cx.global::<GlobalStore>().read(cx).update_checking();
+        KitTitleBar::new().child(
             h_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .when_some(Self::selected_server_info(cx), |this, info| {
-                            let db_label: SharedString = format!("db {}", info.db).into();
-                            // Name + host + db first; PROD trails so it doesn't
-                            // steal focus from the connection identity.
-                            // `items_center` (not baseline): name is semibold
-                            // default size while host/db are `text_xs` — baseline
-                            // alignment made the smaller lines sit low and look
-                            // off-center next to the name.
-                            let mut row = this.child(Icon::new(CustomIconName::Database).small()).child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(Label::new(info.name).font_semibold())
-                                    .child(
-                                        Label::new(info.host)
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .font_family(mono.clone()),
-                                    )
-                                    .child(
-                                        Label::new(db_label)
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .font_family(mono.clone()),
-                                    ),
-                            );
-                            if let Some(label) = info.prod_label {
-                                row = row.child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_sm()
-                                        .bg(prod_bg)
-                                        .child(Label::new(label).text_xs().text_color(prod_fg)),
-                                );
-                            }
-                            row
-                        }),
-                );
-
-        // On Linux/FreeBSD the window keeps server-side decorations (the
-        // `titlebar:` option in main.rs is cfg'd off there — see issue #106),
-        // so the WM already draws minimize/maximize/close. gpui-component's
-        // `TitleBar` appends its own control icons unconditionally on Linux,
-        // which doubled them up — render a plain row with the same chrome
-        // instead (no controls, no drag/double-click-zoom: the WM owns
-        // those). When the compositor forces client-side decorations (e.g.
-        // GNOME on Wayland has no SSD), keep `TitleBar`: its controls are the
-        // only window controls the user gets there.
-        let server_decorated = cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && matches!(window.window_decorations(), Decorations::Server);
-
-        let right_actions = right_actions
-            .when(update_version.is_some(), |this| {
-                let v = update_version.clone().unwrap_or_default();
-                let label = match download_progress {
-                    Some(pct) => format!("{pct}%"),
-                    None => format!("v{v}"),
-                };
-                let dismiss_hover_bg = cx.theme().foreground.alpha(0.12);
-                let dismiss_fg = cx.theme().muted_foreground;
-                let dismiss_tooltip = i18n_status_bar(cx, "update_dismiss");
-                this.child(
-                    Button::new("zedis-titlebar-update")
-                        .ghost()
-                        .small()
-                        .icon(CustomIconName::Download)
-                        .label(label)
-                        // Spinner while re-checking on click; disabled
-                        // during that and while a download is running.
-                        .loading(update_checking)
-                        .disabled(update_checking || download_progress.is_some())
-                        .tooltip(i18n_status_bar(cx, "update_available"))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(UpdateAction::OpenPrompt), cx);
-                        })
-                        // Inline session-only dismiss (tab-pill pattern:
-                        // Button renders children after the label).
-                        // Clears the chip until the next check — the
-                        // persistent "skip this version" stays in the
-                        // update dialog's ×. Hidden while downloading:
-                        // the chip is the only progress surface then.
-                        // `stop_propagation` on mouse-down keeps the ×
-                        // from also triggering the outer download click.
-                        .when(download_progress.is_none(), |this| {
-                            this.child(
-                                div()
-                                    .id("zedis-titlebar-update-dismiss")
-                                    .flex_none()
-                                    .ml_0p5()
-                                    .p_0p5()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .hover(move |s| s.bg(dismiss_hover_bg))
-                                    .tooltip(move |window, cx| Tooltip::new(dismiss_tooltip.clone()).build(window, cx))
-                                    .child(Icon::new(IconName::Close).xsmall().text_color(dismiss_fg))
-                                    .on_mouse_down(MouseButton::Left, |_, _window, cx| {
-                                        cx.stop_propagation();
-                                        cx.update_global::<ZedisGlobalStore, ()>(|store, cx| {
-                                            store.update(cx, |state, cx| state.set_available_update(None, cx));
-                                        });
-                                    }),
-                            )
-                        }),
-                )
-            })
-            .child(
-                Button::new("settings")
-                    .tooltip(i18n_sidebar(cx, "settings_tooltip"))
-                    .icon(IconName::Settings2)
-                    .small()
-                    .ghost()
-                    .dropdown_menu(Self::render_settings_menu)
-                    .anchor(Anchor::TopRight),
-            )
-            .child(
-                Button::new("github")
-                    .tooltip(i18n_sidebar(cx, "github_tooltip"))
-                    .icon(IconName::Github)
-                    .small()
-                    .ghost()
-                    .on_click(|_, _, cx| cx.open_url("https://github.com/vicanso/zedis")),
-            );
-
-        // The left placeholder balances the right actions so `center` stays
-        // centered in both containers below.
-        if server_decorated {
-            h_flex()
-                .flex_shrink_0()
                 .w_full()
-                .h(TITLE_BAR_HEIGHT)
-                // Non-macOS `TITLE_BAR_LEFT_PADDING` (private to the
-                // component) — keeps the row aligned with the TitleBar branch.
-                .pl(px(12.))
                 .items_center()
-                .justify_between()
-                .border_b_1()
-                .border_color(cx.theme().title_bar_border)
-                .bg(cx.theme().tokens.title_bar)
-                .when(is_prod, |this| this.bg(prod_bg).border_t_2().border_color(prod_fg))
-                .child(h_flex().flex_1())
-                .child(center)
-                .child(right_actions)
-                .into_any_element()
-        } else {
-            TitleBar::new()
-                .when(is_prod, |this| this.bg(prod_bg).border_t_2().border_color(prod_fg))
-                .child(h_flex().flex_1())
-                .child(center)
-                .child(right_actions)
-                .into_any_element()
-        }
+                .px_2()
+                .gap_2()
+                .child(Label::new(APP_NAME).text_sm())
+                .child(div().flex_1())
+                .when(!is_app_store_build(), |this| {
+                    this.child(
+                        Button::new("title-update")
+                            .ghost()
+                            .icon(IconName::ArrowUp)
+                            .tooltip(i18n_update(cx, "check"))
+                            .loading(checking)
+                            .on_click(|_, _, cx| cx.dispatch_action(&UpdateAction::Check)),
+                    )
+                })
+                .child(
+                    Button::new("title-settings")
+                        .ghost()
+                        .icon(IconName::Settings)
+                        .tooltip(i18n_sidebar(cx, "preferences"))
+                        .on_click(|_, _, cx| crate::views::open_settings_window(cx)),
+                )
+                .child(
+                    Button::new("title-about")
+                        .ghost()
+                        .icon(IconName::Info)
+                        .on_click(|_, _, cx| open_about_window(cx)),
+                )
+                .child(
+                    Button::new("title-diag")
+                        .ghost()
+                        .icon(IconName::ArrowDown)
+                        .on_click(|_, _, cx| cx.dispatch_action(&DiagnosticsAction::Export)),
+                ),
+        )
     }
 }

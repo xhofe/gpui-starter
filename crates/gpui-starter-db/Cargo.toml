@@ -1,0 +1,26 @@
+[package]
+name = "gpui-starter-db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords = ["gui", "gpui"]
+description = "Local storage layer: redb-backed managers."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+exclude = []
+readme = "./README.md"
+rust-version.workspace = true
+
+[dependencies]
+redb = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[lints.clippy]
+unwrap_used = "deny"

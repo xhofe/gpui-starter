@@ -60,17 +60,17 @@
 
     <Product
         Id='*'
-        Name='zedis'
+        Name='GPUI Starter'
         UpgradeCode='9D2B579F-9F85-4717-ABA3-F82CF881CA99'
-        Manufacturer='Tree Xie'
+        Manufacturer='Andy Hsu'
         Language='1033'
         Codepage='1252'
         Version='$(var.Version)'>
 
         <Package Id='*'
             Keywords='Installer'
-            Description='A blazing-fast, native Redis GUI built with Rust and GPUI.'
-            Manufacturer='Tree Xie'
+            Description='A native desktop app starter built with Rust and GPUI.'
+            Manufacturer='Andy Hsu'
             InstallerVersion='450'
             Languages='1033'
             Compressed='yes'
@@ -83,19 +83,19 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.' />
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1' />
-        <Property Id='DiskPrompt' Value='zedis Installation' />
+        <Property Id='DiskPrompt' Value='GPUI Starter Installation' />
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
 
             <Directory Id='ProgramMenuFolder'>
                 <Component Id='StartMenuShortcutComp' Guid='*'>
                     <Shortcut Id="ApplicationStartMenuShortcut"
-                        Name="Zedis"
-                        Description="Zedis - A High-Performance, GPU-Accelerated Redis Client"
+                        Name="GPUI Starter"
+                        Description="A native desktop app starter built with Rust and GPUI."
                         WorkingDirectory="APPLICATIONFOLDER"
                         Icon="ProductICO"
                         Target="[!exe0]" />
-                    <RegistryValue Root="HKCU" Key="Software\TreeXie\Zedis" Name="installed_sm"
+                    <RegistryValue Root="HKCU" Key="Software\Example\gpui-starter" Name="installed_sm"
                         Type="integer" Value="1" KeyPath="yes" />
                 </Component>
             </Directory>
@@ -103,18 +103,18 @@
             <Directory Id='DesktopFolder'>
                 <Component Id='DesktopShortcutComp' Guid='*'>
                     <Shortcut Id="ApplicationDesktopShortcut"
-                        Name="Zedis"
-                        Description="Zedis - A High-Performance, GPU-Accelerated Redis Client"
+                        Name="GPUI Starter"
+                        Description="A native desktop app starter built with Rust and GPUI."
                         WorkingDirectory="APPLICATIONFOLDER"
                         Icon="ProductICO"
                         Target="[!exe0]" />
-                    <RegistryValue Root="HKCU" Key="Software\TreeXie\Zedis" Name="installed_dt"
+                    <RegistryValue Root="HKCU" Key="Software\Example\gpui-starter" Name="installed_dt"
                         Type="integer" Value="1" KeyPath="yes" />
                 </Component>
             </Directory>
 
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
-                <Directory Id='APPLICATIONFOLDER' Name='zedis'>
+                <Directory Id='APPLICATIONFOLDER' Name='gpui-starter'>
                     <Component Id='License' Guid='*'>
                         <File Id='LicenseFile' DiskId='1' Source='wix\License.rtf' KeyPath='yes' />
                     </Component>
@@ -125,28 +125,8 @@
                     </Component>
 
                     <Component Id='binary0' Guid='*'>
-                        <File Id='exe0' Name='zedis.exe' DiskId='1'
-                            Source='$(var.CargoTargetBinDir)\zedis.exe' KeyPath='yes' />
-                    </Component>
-
-                    <!-- redis:// and rediss:// links open in Zedis: the link
-                         arrives as the "%1" argument and a running instance
-                         receives it through the single-instance hand-off. -->
-                    <Component Id='UrlSchemeRedis' Guid='*'>
-                        <RegistryKey Root='HKCR' Key='redis'>
-                            <RegistryValue Type='string' Value='URL:Redis connection' KeyPath='yes' />
-                            <RegistryValue Type='string' Name='URL Protocol' Value='' />
-                            <RegistryValue Key='DefaultIcon' Type='string' Value='"[APPLICATIONFOLDER]zedis.exe",0' />
-                            <RegistryValue Key='shell\open\command' Type='string' Value='"[APPLICATIONFOLDER]zedis.exe" "%1"' />
-                        </RegistryKey>
-                    </Component>
-                    <Component Id='UrlSchemeRediss' Guid='*'>
-                        <RegistryKey Root='HKCR' Key='rediss'>
-                            <RegistryValue Type='string' Value='URL:Redis connection (TLS)' KeyPath='yes' />
-                            <RegistryValue Type='string' Name='URL Protocol' Value='' />
-                            <RegistryValue Key='DefaultIcon' Type='string' Value='"[APPLICATIONFOLDER]zedis.exe",0' />
-                            <RegistryValue Key='shell\open\command' Type='string' Value='"[APPLICATIONFOLDER]zedis.exe" "%1"' />
-                        </RegistryKey>
+                        <File Id='exe0' Name='gpui-starter.exe' DiskId='1'
+                            Source='$(var.CargoTargetBinDir)\gpui-starter.exe' KeyPath='yes' />
                     </Component>
                 </Directory>
             </Directory>
@@ -166,8 +146,6 @@
 
             <ComponentRef Id='License' />
             <ComponentRef Id='binary0' />
-            <ComponentRef Id='UrlSchemeRedis' />
-            <ComponentRef Id='UrlSchemeRediss' />
 
             <ComponentRef Id='StartMenuShortcutComp' />
             <ComponentRef Id='DesktopShortcutComp' />
@@ -185,10 +163,10 @@
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize' />
 
 
-        <Icon Id='ProductICO' SourceFile='icons\zedis.ico' />
+        <Icon Id='ProductICO' SourceFile='icons\gpui-starter.ico' />
         <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
-        <Property Id='ARPHELPLINK' Value='https://github.com/vicanso/zedis' />
+        <Property Id='ARPHELPLINK' Value='https://github.com/xhofe/gpui-starter' />
 
         <UI>
             <UIRef Id='WixUI_FeatureTree' />

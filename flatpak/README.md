@@ -1,65 +1,35 @@
-# Flathub packaging
+# Flatpak
 
-Files here are the source of truth for the Flathub submission
-(`flathub/io.github.vicanso.zedis` once accepted):
+Files used to ship on Flathub (`flathub/io.github.xhofe.gpui-starter` once accepted):
 
-- `io.github.vicanso.zedis.yml` — flatpak-builder manifest
-- `io.github.vicanso.zedis.desktop` — desktop entry (Icon must equal the app-id;
-  `assets/zedis.desktop` is the AppImage variant and stays untouched)
-- `io.github.vicanso.zedis.metainfo.xml` — AppStream metadata shown in software
-  centers; add a `<release>` entry per version. Installed from a manifest
-  `file` source (not the pinned tag's checkout), so it ships with the
-  manifest and release notes can be bumped without a new upstream tag
+- `io.github.xhofe.gpui-starter.yml` — flatpak-builder manifest
+- `io.github.xhofe.gpui-starter.desktop` — desktop entry (Icon must equal the app-id;
+  `assets/gpui-starter.desktop` is the AppImage variant and stays untouched)
+- `io.github.xhofe.gpui-starter.metainfo.xml` — AppStream metadata shown in software
+  centers
 
-## 1. Prepare a release (scripted)
+Regenerate the offline crate mirror after a lockfile change:
 
 ```bash
-./scripts/submit-flathub.sh v0.4.7            # pin manifest + generate cargo-sources.json
-./scripts/submit-flathub.sh v0.4.7 --submit   # ... and open the flathub/flathub PR via gh
+./scripts/gen-flatpak-sources.sh
 ```
 
-This pins the manifest's git source to the tag (fills the `commit:`
-placeholder via `git rev-parse <tag>^{}`) and runs
-`scripts/gen-flatpak-sources.sh <tag>`, which mirrors every crate in that
-tag's `Cargo.lock` (including git dependencies like GPUI) into
-`flatpak/cargo-sources.json` — Flathub builders have no network access.
-
-The tag must already contain the `flatpak/` directory (i.e. v0.4.7 or later)
-and the release assets must be published.
-
-## 2. Validate + local build (Linux only)
+Validate locally:
 
 ```bash
-appstreamcli validate io.github.vicanso.zedis.metainfo.xml
-desktop-file-validate io.github.vicanso.zedis.desktop
-
-flatpak install flathub org.freedesktop.Sdk//24.08 \
-  org.freedesktop.Sdk.Extension.rust-stable//24.08
-flatpak-builder --user --install --force-clean build-dir io.github.vicanso.zedis.yml
-flatpak run io.github.vicanso.zedis
+appstreamcli validate io.github.xhofe.gpui-starter.metainfo.xml
+desktop-file-validate io.github.xhofe.gpui-starter.desktop
 ```
 
-## 3. Submit
-
-`./scripts/submit-flathub.sh <tag> --submit` automates the flow from
-https://docs.flathub.org/docs/for-app-authors/submission: fork
-`flathub/flathub`, branch off `new-pr`, add `io.github.vicanso.zedis.yml` +
-`cargo-sources.json` + `io.github.vicanso.zedis.metainfo.xml`, open the PR
-against the `new-pr` branch. The `io.github.*` app-id is verified against
-the GitHub account automatically.
-
-macOS note: flatpak-builder cannot run on macOS, so skip step 2 and let the
-Flathub PR's CI do the build — iterate on the PR if it flags anything.
-
-After acceptance, new releases are shipped by updating the tag/commit,
-`cargo-sources.json`, and the metainfo's `<release>` entries in the
-`flathub/io.github.vicanso.zedis` repo — consider a small CI job for that.
-
-## Note on SSH keys
-
-The sandbox deliberately does not request `~/.ssh`. Users who tunnel with a
-key file need a one-time override:
+Build:
 
 ```bash
-flatpak override --user --filesystem=~/.ssh:ro io.github.vicanso.zedis
+flatpak-builder --user --install --force-clean build-dir io.github.xhofe.gpui-starter.yml
+flatpak run io.github.xhofe.gpui-starter
 ```
+
+First-time Flathub submission: fork `flathub/flathub`, branch off `new-pr`, add
+`io.github.xhofe.gpui-starter.yml` + `cargo-sources.json` +
+`io.github.xhofe.gpui-starter.metainfo.xml`, open the PR. After acceptance,
+releases go to the dedicated `flathub/io.github.xhofe.gpui-starter` repo.
+`scripts/submit-flathub.sh` automates pinning the tag and assembling those files.

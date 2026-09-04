@@ -1,0 +1,41 @@
+# Flathub manifest for GPUI Starter. See flatpak/README.md for how to (re)generate
+# cargo-sources.json and test a local build before submitting to Flathub.
+app-id: io.github.xhofe.gpui-starter
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  # Flathub builds are network-isolated; the freedesktop SDK has no Rust
+  # toolchain of its own.
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: gpui-starter
+finish-args:
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=xdg-config/gpui-starter:create
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/gpui-starter/cargo
+
+modules:
+  - name: gpui-starter
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --features mimalloc
+      - install -Dm755 target/release/gpui-starter /app/bin/gpui-starter
+      - install -Dm644 flatpak/io.github.xhofe.gpui-starter.desktop /app/share/applications/io.github.xhofe.gpui-starter.desktop
+      - install -Dm644 assets/icon.png /app/share/icons/hicolor/512x512/apps/io.github.xhofe.gpui-starter.png
+      - install -Dm644 icons/gpui-starter-icon.svg /app/share/icons/hicolor/scalable/apps/io.github.xhofe.gpui-starter.svg
+      - install -Dm644 io.github.xhofe.gpui-starter.metainfo.xml /app/share/metainfo/io.github.xhofe.gpui-starter.metainfo.xml
+    sources:
+      - cargo-sources.json
+      - type: file
+        path: io.github.xhofe.gpui-starter.metainfo.xml
+      - type: git
+        url: https://github.com/xhofe/gpui-starter.git
+        tag: v0.1.0
+        commit: TODO

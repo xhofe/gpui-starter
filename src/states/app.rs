@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,330 +12,78 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::connection::ServerCommand;
-use crate::connection::{
-    RedisServer, ReplyFormat, get_server, get_servers, save_servers, set_redis_connection_timeout,
-    set_redis_response_timeout,
-};
 use crate::constants::{SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH};
 use crate::error::Error;
 use crate::helpers::{
-    ConfigRecovery, DEFAULT_UI_FONT_SIZE, UpdateInfo, decrypt, encrypt, get_key_tree_widths, get_or_create_config_dir,
-    load_config_with_recovery, set_configured_proxy, unix_ts, write_file_atomic_with_backup,
+    ConfigRecovery, TimeZonePref, UpdateInfo, get_or_create_config_dir, load_config_with_recovery, unix_ts,
+    write_file_atomic_with_backup,
 };
-use crate::helpers::{DEFAULT_DATE_FORMAT, TimeZonePref};
-use crate::startup::is_nightly_build;
-use crate::states::i18n_common;
-use chrono::Local;
-use gpui::{Action, App, AppContext, Bounds, Context, Entity, EventEmitter, Global, Pixels, SharedString, Window};
-use gpui_kit::component::{ThemeMode, dialog::DialogButtonProps};
+use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, Global, Pixels, SharedString};
+use gpui_kit::component::ThemeMode;
+use gpui_kit::component::dialog::DialogButtonProps;
 use schemars::JsonSchema;
-use serde::Deserialize;
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use sys_locale::get_locale;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Top-level navigation target — the runtime single source of truth for
-/// "where am I", including the active connection: a connection-scoped page is
-/// only representable together with its `(id, db)`. App-scoped pages
-/// (`Home` / `Settings` / `Protos` / `Scripts`) stand alone.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Route {
     #[default]
     Home,
+    Todos,
     Settings,
-    Protos,
-    Scripts,
-    Server {
-        id: SharedString,
-        db: usize,
-        view: ServerView,
-    },
-}
-
-/// A connection-scoped page, rendered against the active `selected_server`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ServerView {
-    #[default]
-    Editor,
-    Metrics,
-    Slowlog,
-    MemoryAnalysis,
-    Clients,
-    Monitor,
-    Config,
-    Acl,
-    Search,
-    Functions,
-    LuaScripts,
-    Persistence,
-    KeyspaceNotifications,
-    Topology,
-    ServerLoad,
-    /// `HOTKEYS` tracking (Redis 8.6) — top keys by CPU time / network bytes.
-    Hotkeys,
-    ValueSearch,
-    /// Raw `INFO everything` browser — every field, filterable, for the
-    /// long tail the structured panels don't surface.
-    ServerInfo,
 }
 
 impl Route {
-    /// Stable lowercase name used for persistence (and, later, deep links).
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Route::Home => "home",
+            Route::Todos => "todos",
             Route::Settings => "settings",
-            Route::Protos => "protos",
-            Route::Scripts => "scripts",
-            Route::Server { view, .. } => view.as_str(),
         }
     }
-    /// Parse an app-level route name (case-insensitive). Connection-scoped
-    /// names go through `ServerView::from_name` instead — they can't stand
-    /// alone as a `Route` without an `(id, db)`.
-    pub fn app_from_name(s: &str) -> Option<Route> {
-        Some(match s.trim().to_ascii_lowercase().as_str() {
-            "home" => Route::Home,
-            "settings" => Route::Settings,
-            "protos" => Route::Protos,
-            "scripts" => Route::Scripts,
-            _ => return None,
-        })
-    }
-    /// The connection-scoped view, if this is a server route.
-    pub fn server_view(&self) -> Option<ServerView> {
-        match self {
-            Route::Server { view, .. } => Some(*view),
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "home" | "" => Some(Route::Home),
+            "todos" => Some(Route::Todos),
+            "settings" => Some(Route::Settings),
             _ => None,
         }
     }
-    /// The `(id, db)` this route renders against, if it is a server route.
-    pub fn server(&self) -> Option<(SharedString, usize)> {
-        match self {
-            Route::Server { id, db, .. } => Some((id.clone(), *db)),
-            _ => None,
-        }
-    }
-    pub fn is_server(&self) -> bool {
-        matches!(self, Route::Server { .. })
-    }
 }
 
-impl ServerView {
-    /// Stable lowercase name (matches the lowercased legacy variant name).
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ServerView::Editor => "editor",
-            ServerView::Metrics => "metrics",
-            ServerView::Slowlog => "slowlog",
-            ServerView::MemoryAnalysis => "memoryanalysis",
-            ServerView::Clients => "clients",
-            ServerView::Monitor => "monitor",
-            ServerView::Config => "config",
-            ServerView::Acl => "acl",
-            ServerView::Search => "search",
-            ServerView::Functions => "functions",
-            ServerView::LuaScripts => "luascripts",
-            ServerView::Persistence => "persistence",
-            ServerView::KeyspaceNotifications => "keyspacenotifications",
-            ServerView::Topology => "topology",
-            ServerView::ServerLoad => "serverload",
-            ServerView::Hotkeys => "hotkeys",
-            ServerView::ValueSearch => "valuesearch",
-            ServerView::ServerInfo => "serverinfo",
-        }
-    }
-    /// The probed commands this panel cannot function without — when one is
-    /// missing or denied on the server, the route renders a placeholder
-    /// instead of the panel. Panels that still have something to offer
-    /// without the server (the memory analyzer's offline RDB mode, the local
-    /// Lua library) or that are gated elsewhere (Search by module, Topology
-    /// by server type) list nothing here and degrade section by section.
-    pub const fn required_commands(self) -> &'static [ServerCommand] {
-        match self {
-            ServerView::Metrics | ServerView::Persistence | ServerView::ServerLoad | ServerView::ServerInfo => {
-                &[ServerCommand::Info]
-            }
-            ServerView::Slowlog => &[ServerCommand::SlowlogGet],
-            ServerView::Hotkeys => &[ServerCommand::HotkeysGet],
-            ServerView::Clients => &[ServerCommand::ClientList],
-            ServerView::Monitor => &[ServerCommand::Monitor],
-            ServerView::Config => &[ServerCommand::ConfigGet],
-            ServerView::Acl => &[ServerCommand::AclList],
-            ServerView::Functions => &[ServerCommand::FunctionList],
-            ServerView::KeyspaceNotifications => &[ServerCommand::Subscribe],
-            ServerView::ValueSearch => &[ServerCommand::Scan],
-            ServerView::Editor
-            | ServerView::MemoryAnalysis
-            | ServerView::Search
-            | ServerView::LuaScripts
-            | ServerView::Topology => &[],
-        }
-    }
-
-    /// Parse a connection-scoped view name (expects an already-lowercased str).
-    pub fn from_name(s: &str) -> Option<ServerView> {
-        Some(match s {
-            "editor" => ServerView::Editor,
-            "metrics" => ServerView::Metrics,
-            "slowlog" => ServerView::Slowlog,
-            "memoryanalysis" => ServerView::MemoryAnalysis,
-            "clients" => ServerView::Clients,
-            "monitor" => ServerView::Monitor,
-            "config" => ServerView::Config,
-            "acl" => ServerView::Acl,
-            "search" => ServerView::Search,
-            "functions" => ServerView::Functions,
-            "luascripts" => ServerView::LuaScripts,
-            "persistence" => ServerView::Persistence,
-            "keyspacenotifications" => ServerView::KeyspaceNotifications,
-            "topology" => ServerView::Topology,
-            "serverload" => ServerView::ServerLoad,
-            "hotkeys" => ServerView::Hotkeys,
-            "valuesearch" => ServerView::ValueSearch,
-            "serverinfo" => ServerView::ServerInfo,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub enum FontSize {
-    Small,
-    #[default]
-    Medium,
-    Large,
-}
-impl FontSize {
-    pub fn to_pixels(self) -> Option<f32> {
-        match self {
-            FontSize::Small => Some(14.0),
-            FontSize::Medium => None,
-            FontSize::Large => Some(18.0),
-        }
-    }
-}
-
-/// Theme selection actions for the settings menu
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, JsonSchema, Action)]
+#[derive(Clone, Copy, PartialEq, Debug, Deserialize, JsonSchema, gpui::Action)]
 pub enum ThemeAction {
-    /// Light theme mode
     Light,
-    /// Dark theme mode
     Dark,
-    /// Follow system theme
     System,
 }
 
-/// Apply a named theme from the registry (carries the theme's name, e.g.
-/// "Ayu Dark"). Dispatched from the title-bar theme menu.
-#[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Action)]
+#[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, gpui::Action)]
 pub struct SelectThemeAction {
     pub name: String,
 }
 
-/// Locale/language selection actions for the settings menu
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, JsonSchema, Action)]
+#[derive(Clone, Copy, PartialEq, Debug, Deserialize, JsonSchema, gpui::Action)]
 pub enum LocaleAction {
-    /// English language
     En,
-    /// Chinese language
     Zh,
-    /// Japanese language
-    Ja,
-    /// Russian language
-    Ru,
-    /// Portuguese language
-    Pt,
-    /// German language
-    De,
-    /// French language
-    Fr,
-    /// Spanish language
-    Es,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, JsonSchema, Action)]
-pub enum SettingsAction {
-    Editor,
-    Protos,
-    Scripts,
-}
-
-/// Server-scoped tools that open a sub-route. Triggered from the status bar
-/// "Tools" dropdown so the bar itself does not need a button per route.
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, JsonSchema, Action)]
-pub enum ServerToolsAction {
-    Monitor,
-    Config,
-    Acl,
-    Search,
-    Functions,
-    LuaScripts,
-    Persistence,
-    KeyspaceNotifications,
-    Topology,
-    ServerLoad,
-    Hotkeys,
-    ValueSearch,
-    ServerInfo,
-    /// Opens the local recycle-bin dialog (soft-deleted keys) instead of a
-    /// sub-route — handled specially in `main.rs`.
-    Trash,
-    /// Opens the key dump import window for the current server / db
-    /// (RESTORE) — handled specially in `main.rs`, not a sub-route.
-    ImportKeys,
-    /// Opens the export window for every key currently loaded in the
-    /// active connection's tree — the selection-free Tools-menu entry.
-    ExportKeys,
-    /// Switches the editor area into Pub/Sub (channel) mode — same as the
-    /// key tree's "Pubsub Mode" menu item, surfaced in the Tools menu.
-    PubsubMode,
-    /// `FLUSHDB` on the active connection — opens the destructive-command
-    /// confirm first, like every other flush path. Not a sub-route.
-    FlushDb,
-    /// `FLUSHALL` on the active connection — every database on the instance.
-    FlushAll,
-    /// The probed command matrix for the active connection (a dialog).
-    Capabilities,
 }
 
 const LIGHT_THEME_MODE: &str = "light";
 const DARK_THEME_MODE: &str = "dark";
-
-/// Minimum gap between two silent startup update checks, in seconds. Releases
-/// are far rarer than launches, so a couple of days is plenty — a user who
-/// wants one sooner has the manual check in the title-bar chip.
 const UPDATE_CHECK_INTERVAL: i64 = 2 * 24 * 60 * 60;
-
-/// Keys for the one-time onboarding hints (`dismissed_hints`). Each hint
-/// shows at most once, ever; the key is persisted the first time it fires.
 pub const HINT_WELCOME: &str = "welcome";
-pub const HINT_FIRST_CONNECT: &str = "first_connect";
-pub const HINT_TOPOLOGY: &str = "topology";
-pub const HINT_MEMORY_ANALYSIS: &str = "memory_analysis";
+const MAX_WINDOW_PLACEMENTS: usize = 8;
 
-fn get_or_create_server_config() -> Result<PathBuf> {
-    // Same file name in both environments — a development run is isolated by its
-    // own config *directory* (`<config_dir>/dev`), not by a `-dev` file suffix.
-    let path = get_or_create_config_dir()?.join("zedis.toml");
-    if path.exists() {
-        return Ok(path);
-    }
-    std::fs::write(&path, "")?;
-    Ok(path)
-}
-
-/// Notification category for user feedback
 #[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Default)]
 pub enum NotificationCategory {
     #[default]
@@ -345,8 +93,7 @@ pub enum NotificationCategory {
     Error,
 }
 
-/// Notification action that can be triggered in the UI
-#[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Action, Default)]
+#[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, gpui::Action, Default)]
 pub struct NotificationAction {
     pub title: Option<SharedString>,
     pub category: NotificationCategory,
@@ -354,7 +101,6 @@ pub struct NotificationAction {
 }
 
 impl NotificationAction {
-    /// Creates a new info notification
     pub fn new_info(message: SharedString) -> Self {
         Self {
             category: NotificationCategory::Info,
@@ -362,8 +108,6 @@ impl NotificationAction {
             ..Default::default()
         }
     }
-
-    /// Creates a new success notification
     pub fn new_success(message: SharedString) -> Self {
         Self {
             category: NotificationCategory::Success,
@@ -371,8 +115,6 @@ impl NotificationAction {
             ..Default::default()
         }
     }
-
-    /// Creates a new warning notification
     pub fn new_warning(message: SharedString) -> Self {
         Self {
             category: NotificationCategory::Warning,
@@ -380,8 +122,6 @@ impl NotificationAction {
             ..Default::default()
         }
     }
-
-    /// Creates a new error notification
     pub fn new_error(message: SharedString) -> Self {
         Self {
             category: NotificationCategory::Error,
@@ -389,297 +129,109 @@ impl NotificationAction {
             ..Default::default()
         }
     }
-
-    /// Sets the title for the notification
-    pub fn with_title(mut self, title: SharedString) -> Self {
-        self.title = Some(title);
-        self
-    }
 }
 
+#[derive(Clone, Debug)]
 pub enum GlobalEvent {
-    /// A notification has been emitted.
     Notification(NotificationAction),
-    /// User selected a different server
-    ServerSelected(SharedString, usize),
-    /// Ask the workspace root (`main.rs`) to open the connection in a content
-    /// tab. The `bool` forces a fresh tab: `false` re-activates the tab already
-    /// bound to `(id, db)` when one exists (reveal-or-open); `true` always
-    /// appends a new tab, even alongside an existing one.
-    ServerOpenInNewTab(SharedString, usize, bool),
-    /// Server list config has been modified (add/remove/edit).
-    ServerListUpdated,
-    /// Route has been changed.
-    RouteChanged(Route),
-    /// Update availability changed (a newer release was found, or the prompt was
-    /// cleared). The status bar re-reads `available_update` from the store.
-    UpdateAvailable,
-    /// Installer download progress changed (0–100, or cleared). The status bar
-    /// re-reads `download_progress` to show the percentage on the update chip.
+    RouteChanged,
     UpdateDownloadProgress,
 }
 
-/// Direction passed to [`ZedisGlobalStore::reorder_server`].
-#[derive(Debug, Clone, Copy)]
-pub enum ReorderDirection {
-    Up,
-    Down,
-}
-
-/// Cap on remembered per-display window placements (MRU order). Bounds the
-/// config size for users who connect to many different monitors over time.
-const MAX_WINDOW_PLACEMENTS: usize = 8;
-
-/// A window placement anchored to a specific display, so it survives
-/// multi-monitor rearrangement. `bounds` is the window rectangle **relative to
-/// that display's origin**; `display_uuid` identifies the display across
-/// restarts. Kept per display in [`ZedisAppState::window_placements`]; the
-/// absolute [`ZedisAppState::bounds`] is the fallback (see
-/// `main.rs::resolve_window_bounds`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WindowPlacement {
     pub display_uuid: String,
     pub bounds: Bounds<Pixels>,
-    /// The window was maximized on this display; `bounds` then keeps the
-    /// last *windowed* rectangle, which is what un-maximizing returns to.
-    #[serde(default)]
     pub maximized: bool,
 }
 
-/// Persisted scope of the multi-database search palette (which
-/// connections a search fans out to). Only ids are stored for the
-/// explicit list — names/groups resolve live so renames don't break it.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub enum MultiSearchScope {
-    /// Search every open workspace tab's connection. (Alias keeps configs
-    /// written by the pre-rename build parsing — a bad variant would fail
-    /// the whole `ZedisAppState` deserialize and reset the config.)
-    #[default]
-    #[serde(alias = "ActiveTab")]
-    OpenTabs,
-    /// Search every connection in one server group (by group name).
-    Group(String),
-    /// Search an explicit set of connections (server ids).
-    Servers(Vec<String>),
-}
-
-/// Persisted to `zedis.toml`. `#[serde(default)]` is the upgrade contract: a
-/// file written by any earlier version — or a `.bak` restored by the config
-/// recovery — must parse with whatever fields it has, so every new field
-/// needs a `Default`, never a required value. `states/fixtures/` holds real
-/// old files and `upgrade_fixtures` keeps this honest.
+/// Persisted to `gpui-starter.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ZedisAppState {
-    // Runtime route — the single source of truth for "where am I", including
-    // the `(id, db)` of connection-scoped views. Reassembled by `try_new` from
-    // `route_token` + the `selected_server` snapshot below, so the on-disk
-    // format is unchanged from before the (id, db) fold-in.
+pub struct AppState {
     #[serde(skip)]
     route: Route,
-    /// Persisted flat route name (`"metrics"`, `"home"`, …) — same key and
-    /// format the pre-fold config used. Kept in lockstep with `route` by the
-    /// navigation core.
     #[serde(rename = "route", default)]
     route_token: String,
-    // Runtime-only: a stale "open key X" param shouldn't survive a restart.
-    #[serde(skip)]
-    query: Option<HashMap<String, String>>,
     locale: Option<String>,
     bounds: Option<Bounds<Pixels>>,
-    /// Per-display window placements (origin relative to each display), keyed by
-    /// `display_uuid`, most-recently-used first and capped at
-    /// `MAX_WINDOW_PLACEMENTS`. Lets each monitor remember its own last position
-    /// (e.g. work vs home). `bounds` above is the fallback for old configs / a
-    /// display that's gone.
     #[serde(default)]
     window_placements: Vec<WindowPlacement>,
-    key_tree_width: Pixels,
-    /// Persisted width of the kv-table entry panel — the right-hand
-    /// preview/edit pane in the collection editors (Hash/List/Set/ZSet/
-    /// Stream), user-resizable via the split handle. Global: a display
-    /// preference, not a per-server setting (same policy as
-    /// `key_tree_width`). `None` falls back to half the viewport.
-    #[serde(default)]
-    kv_edit_panel_width: Option<Pixels>,
     theme: Option<String>,
-    /// Selected named theme from the registry (e.g. "Ayu Dark"). Takes
-    /// precedence over the `theme` mode; `None` falls back to Light/Dark/System.
     theme_name: Option<String>,
-    font_size: Option<FontSize>,
-    /// Continuous UI font size (rem px) from the settings slider. Takes
-    /// precedence over the legacy `font_size` enum; `None` falls back to it,
-    /// then to gpui's 16px default. Additive so old configs migrate silently.
     font_rem_px: Option<f32>,
-    /// User-chosen UI font family (all non-mono text). Empty/None ⇒ the OS
-    /// system UI font. A single family name, never a comma-separated stack.
     ui_font_family: Option<String>,
-    /// User-chosen monospace font family (code / tables / terminal). Empty/None
-    /// ⇒ the bundled JetBrains Mono.
     mono_font_family: Option<String>,
-    max_key_tree_depth: Option<usize>,
-    auto_expand_threshold: Option<usize>,
-    key_scan_count: Option<usize>,
-    /// Multi-database search palette: which connections to search.
-    /// Persisted so the palette reopens with the last scope.
-    #[serde(default)]
-    multi_search_scope: MultiSearchScope,
-    /// Multi-database search palette: per-server SCAN result cap.
-    multi_search_scan_count: Option<usize>,
-    /// Value search: keys examined per search before stopping (`None` ⇒
-    /// the 10k default). The panel's other guardrails (value-size and
-    /// container-element skip thresholds) stay fixed — they protect the
-    /// server, not the search depth.
-    value_search_scan_cap: Option<usize>,
-    /// Value search: wall-clock budget in seconds (`None` ⇒ 10s).
-    value_search_time_budget_secs: Option<u64>,
-    /// Value search: matches kept before truncating (`None` ⇒ 500).
-    value_search_max_matches: Option<usize>,
-    /// One-shot handoff from the multi-database search palette: once the
-    /// clicked hit's `(server, db)` connects, the editor selects this key.
-    /// Runtime only.
-    #[serde(skip)]
-    multi_search_pending_key: Option<(String, usize, String)>,
-    max_truncate_length: Option<usize>,
-    redis_connection_timeout: Option<Duration>,
-    redis_response_timeout: Option<Duration>,
-    /// Last-active connection snapshot. `route` is the runtime truth for the
-    /// current view's connection; this survives app-level detours (Settings /
-    /// Protos) and restarts, so back-navigation and startup restore know which
-    /// server to return to.
-    selected_server: Option<(String, usize)>,
-    /// Per-server last-viewed database, so connecting reopens the DB the user
-    /// left it on instead of always DB 0. Keyed by server id.
-    #[serde(default)]
-    last_db: HashMap<String, usize>,
-    /// Workspace tabs from the last session — every tab's `(server_id, db)`
-    /// in strip order (tabs still on Home are skipped). Restored at startup;
-    /// `selected_server` decides which of them starts active. Empty for the
-    /// everyday single-tab session, so the config stays unchanged.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    open_tabs: Vec<(String, usize)>,
-    tray_enabled: Option<bool>,
-    /// When `true` (default), deleting a single key first stashes its DUMP
-    /// payload into the local recycle bin (24h retention) so it can be
-    /// restored. `false` deletes permanently, as before.
-    soft_delete: Option<bool>,
-    /// When `true`, the key tree fetches TTL per key during SCAN and shows
-    /// a TTL chip next to each leaf. When `false` the TTL pipeline command
-    /// is skipped (cheaper scans on large dbs) and no chip is rendered.
-    /// Defaults to `true`.
-    show_key_tree_ttl: Option<bool>,
-    /// When `true`, clicking a server in the sidebar opens it in a workspace
-    /// tab (reveal-or-open) instead of switching the current tab in place.
-    /// ⌘/Ctrl+click inverts this per click; ⌘⇧+click always duplicates.
-    /// Defaults to `false`.
-    sidebar_click_new_tab: Option<bool>,
-    /// Server-page group section keys whose card grid is collapsed.
-    /// Keyed by group label (or `"__none__"` for the ungrouped
-    /// bucket). A renamed/deleted group simply leaves a harmless
-    /// stale string here that no section ever matches.
-    collapsed_server_groups: Option<Vec<String>>,
-    /// Whether the navigation sidebar is collapsed to an icon-only rail.
-    #[serde(default)]
-    sidebar_collapsed: Option<bool>,
-    /// Base URL of the OpenAI-compatible endpoint used by the AI
-    /// memory-analysis feature, e.g. `https://api.openai.com/v1`.
-    ai_base_url: Option<String>,
-    /// API key for the AI endpoint. Stored **encrypted** (AES-256-GCM,
-    /// same scheme as server passwords) — never persisted in plaintext.
-    ai_api_key: Option<String>,
-    /// Model name passed to the AI endpoint, e.g. `gpt-4o-mini`.
-    ai_model: Option<String>,
-    /// How the terminal renders replies (`text` / `table` / `json`, see
-    /// `ReplyFormat::as_str`). Unset = text.
-    terminal_reply_format: Option<String>,
-    /// Outbound HTTP proxy for the app's own requests (update check, AI).
-    /// `None`/empty follows the environment / OS system proxy; `"none"`
-    /// forces a direct connection; anything else is a proxy URI. Mirrored
-    /// into `helpers::proxy` (background HTTP callers have no `cx`).
     http_proxy: Option<String>,
-    /// When `true` (default), check GitHub for a newer release on startup,
-    /// throttled to [`UPDATE_CHECK_INTERVAL`]. `false` disables the network
-    /// check entirely.
+    tray_enabled: Option<bool>,
     auto_update_check: Option<bool>,
-    /// Follow pre-releases and the nightly build as well as stable releases.
-    /// Unset = on for a nightly build, off otherwise.
-    update_prerelease: Option<bool>,
-    /// Zone every rendered timestamp uses: `"local"` (default) or `"utc"`.
-    time_zone: Option<String>,
-    /// Date + time layout id (`helpers::DATE_FORMATS`); unset = ISO-like.
-    date_format: Option<String>,
-    /// Unix seconds of the last update check, used to throttle the startup
-    /// check to one per [`UPDATE_CHECK_INTERVAL`].
     last_update_check: Option<i64>,
-    /// A version the user chose to skip (e.g. `"0.5.0"`). Suppresses the silent
-    /// startup prompt for exactly that version; a manual check ignores it.
-    skipped_version: Option<String>,
-    /// One-time onboarding hints (welcome card, first-connect toast, panel
-    /// banners) the user has already seen — see the `HINT_*` constants.
-    dismissed_hints: Option<Vec<String>>,
-    /// A newer release found by a check, awaiting the user's action. Runtime
-    /// only (never persisted) — it's re-discovered on the next check. Drives
-    /// the status-bar update chip; the chip's click opens the prompt for it.
-    #[serde(skip)]
-    available_update: Option<UpdateInfo>,
-    /// Installer download progress as `(downloaded, total)` bytes while an
-    /// update is downloading; `None` when idle. Runtime only — the update
-    /// dialog renders the bar plus "6.2 MB / 13.2 MB", the title-bar chip
-    /// renders just the percentage (see `download_percent`).
+    skipped_update_version: Option<String>,
+    include_prerelease: Option<bool>,
+    time_zone: Option<String>,
+    date_format: Option<String>,
+    sidebar_collapsed: Option<bool>,
+    dismissed_hints: Vec<String>,
+    #[serde(default)]
+    open_tabs: Vec<String>,
+    #[serde(default)]
+    active_tab: usize,
     #[serde(skip)]
     download_progress: Option<(u64, u64)>,
-    /// See [`Self::update_installed`]. Runtime only, never persisted.
     #[serde(skip)]
     update_installed: bool,
-    /// True while an update check (network fetch) is in flight. Runtime only —
-    /// drives the title-bar update chip's loading spinner.
     #[serde(skip)]
     update_checking: bool,
+    #[serde(skip)]
+    available_update: Option<UpdateInfo>,
 }
 
-impl EventEmitter<GlobalEvent> for ZedisAppState {}
+impl EventEmitter<GlobalEvent> for AppState {}
 
 #[derive(Debug, Clone)]
-pub struct ZedisGlobalStore {
-    app_state: Entity<ZedisAppState>,
+pub struct GlobalStore {
+    app_state: Entity<AppState>,
 }
 
-impl ZedisGlobalStore {
-    pub fn new(app_state: Entity<ZedisAppState>) -> Self {
+impl GlobalStore {
+    pub fn new(app_state: Entity<AppState>) -> Self {
         Self { app_state }
     }
-    pub fn state(&self) -> Entity<ZedisAppState> {
+    pub fn state(&self) -> Entity<AppState> {
         self.app_state.clone()
     }
     pub fn update<R, C: AppContext>(
         &self,
         cx: &mut C,
-        update: impl FnOnce(&mut ZedisAppState, &mut Context<ZedisAppState>) -> R,
+        update: impl FnOnce(&mut AppState, &mut Context<AppState>) -> R,
     ) -> R {
         self.app_state.update(cx, update)
     }
-    pub fn read<'a>(&self, cx: &'a App) -> &'a ZedisAppState {
+    pub fn read<'a>(&self, cx: &'a App) -> &'a AppState {
         self.app_state.read(cx)
     }
 }
 
-impl Global for ZedisGlobalStore {}
+impl Global for GlobalStore {}
 
-/// Persists the app state crash-safely: atomic replace plus a rolling
-/// `zedis.toml.bak` of the previous version (see `write_file_atomic_with_backup`).
-pub fn save_app_state(state: &ZedisAppState) -> Result<()> {
-    let path = get_or_create_server_config()?;
+fn config_path() -> Result<PathBuf> {
+    let path = get_or_create_config_dir()?.join("gpui-starter.toml");
+    if !path.exists() {
+        std::fs::write(&path, "")?;
+    }
+    Ok(path)
+}
+
+pub fn save_app_state(state: &AppState) -> Result<()> {
+    let path = config_path()?;
     let value = toml::to_string(state)?;
     write_file_atomic_with_backup(&path, value.as_bytes())?;
     Ok(())
 }
 
-/// The bundled UI locales — one `locales/<lang>.toml` each.
-pub const SUPPORTED_LOCALES: [&str; 8] = ["en", "zh", "de", "es", "fr", "ja", "pt", "ru"];
+pub const SUPPORTED_LOCALES: [&str; 2] = ["en", "zh"];
 
-/// The bundled locale for an OS language tag — `zh-Hans-CN`, `en_US`,
-/// `pt-BR`, `de_DE.UTF-8`: the language subtag decides, region and script
-/// are ignored, and a language without a bundle falls back to English.
 pub fn language_from_system_locale(tag: Option<&str>) -> &'static str {
     let lang = tag
         .unwrap_or_default()
@@ -695,243 +247,58 @@ pub fn language_from_system_locale(tag: Option<&str>) -> &'static str {
         .unwrap_or("en")
 }
 
-/// The OS language as a bundled locale, read once per process.
 fn system_language() -> &'static str {
     static LANGUAGE: OnceLock<&'static str> = OnceLock::new();
     LANGUAGE.get_or_init(|| language_from_system_locale(get_locale().as_deref()))
 }
 
-impl ZedisAppState {
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            locale: Some(system_language().to_string()),
+            ..Default::default()
+        }
+    }
+
     pub fn try_new() -> Result<Self> {
-        let path = get_or_create_server_config()?;
-        // A damaged file is quarantined and the `.bak` restored (or defaults
-        // used) — never parsed-as-empty, which the next save would then
-        // write over the user's preferences. The recovery is reported in the
-        // UI once the window is up (`take_config_recoveries`).
+        let path = config_path()?;
         let loaded = load_config_with_recovery(&path, |text| toml::from_str::<Self>(text).map_err(|e| e.to_string()))?;
         match &loaded.recovery {
             Some(ConfigRecovery::RestoredFromBackup { corrupt_path, .. }) => {
-                warn!(corrupt = %corrupt_path.display(), "zedis.toml was unreadable; restored from backup")
+                warn!(corrupt = %corrupt_path.display(), "gpui-starter.toml was unreadable; restored from backup")
             }
             Some(ConfigRecovery::Reset { corrupt_path, .. }) => {
-                error!(corrupt = %corrupt_path.display(), "zedis.toml was unreadable and no backup parsed; reset to defaults")
+                error!(corrupt = %corrupt_path.display(), "gpui-starter.toml was unreadable and no backup parsed; reset to defaults")
             }
             None => {}
         }
         let mut state = loaded.value.unwrap_or_default();
-        // First launch, or a cleared preference: follow the OS language,
-        // clamped to a bundled locale. The raw language tag used to be
-        // stored verbatim, so an unsupported one ("ko") rendered English
-        // through the fallback while the language menu showed nothing.
         if state.locale.as_deref().is_none_or(|l| l.trim().is_empty()) {
             state.locale = Some(system_language().to_string());
         }
-        // Reassemble the runtime route from the persisted flat token plus the
-        // last-connection snapshot; a connection-scoped view whose remembered
-        // server is gone (or absent) opens Home instead.
-        state.route = match Route::app_from_name(&state.route_token) {
-            Some(route) => route,
-            None => {
-                let view = ServerView::from_name(state.route_token.trim().to_ascii_lowercase().as_str());
-                let conn = state.selected_server.as_ref().filter(|(id, _)| get_server(id).is_ok());
-                match (view, conn) {
-                    (Some(view), Some((id, db))) => Route::Server {
-                        id: SharedString::from(id.clone()),
-                        db: *db,
-                        view,
-                    },
-                    _ => Route::Home,
-                }
-            }
-        };
+        state.route = Route::from_name(&state.route_token).unwrap_or(Route::Home);
         state.route_token = state.route.as_str().to_string();
-
-        if let Some(redis_connection_timeout) = state.redis_connection_timeout {
-            set_redis_connection_timeout(redis_connection_timeout);
+        if state.open_tabs.is_empty() {
+            state.open_tabs = vec![state.route.as_str().to_string()];
+            state.active_tab = 0;
         }
-        if let Some(redis_response_timeout) = state.redis_response_timeout {
-            set_redis_response_timeout(redis_response_timeout);
-        }
-
         Ok(state)
     }
-    pub fn new() -> Self {
-        Self { ..Default::default() }
-    }
-    pub fn key_tree_width(&self) -> Pixels {
-        self.key_tree_width
-    }
-    pub fn content_width(&self) -> Option<Pixels> {
-        let bounds = self.bounds?;
-        let width = bounds.size.width.as_f32();
-        let (key_tree_width, _, _) = get_key_tree_widths(self.key_tree_width);
-        Some((width - self.sidebar_px().as_f32() - key_tree_width.as_f32()).into())
-    }
-    /// The sidebar's *current* width — the icon rail is far narrower than the
-    /// expanded panel, so anything sizing itself against the sidebar has to ask
-    /// rather than assume [`SIDEBAR_WIDTH`].
-    pub fn sidebar_px(&self) -> Pixels {
-        if self.sidebar_collapsed() {
-            SIDEBAR_COLLAPSED_WIDTH
-        } else {
-            SIDEBAR_WIDTH
-        }
-    }
-    pub fn set_key_tree_width(&mut self, width: Pixels) {
-        self.key_tree_width = width;
-    }
-    pub fn route(&self) -> Route {
-        self.route.clone()
-    }
-    pub fn bounds(&self) -> Option<&Bounds<Pixels>> {
-        self.bounds.as_ref()
-    }
-    /// Persist navigation state in the background so the app reopens on the last
-    /// route (only the route lands on disk — `query` is serde-skipped).
-    fn persist_nav(&self, cx: &mut Context<Self>) {
-        let snapshot = self.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = save_app_state(&snapshot) {
-                    error!(error = %e, "failed to persist route");
-                }
-            })
-            .detach();
-    }
-    fn go_to_with_query(&mut self, route: Route, query: Option<HashMap<String, String>>, cx: &mut Context<Self>) {
-        if self.route == route && self.query == query {
-            return;
-        }
-        self.query = query;
-        self.apply_route(route, cx);
-        cx.notify();
-        self.persist_nav(cx);
-    }
-    /// The single mutation point for `route`: keeps the persisted token and the
-    /// last-connection snapshot in lockstep, and emits `RouteChanged` (always)
-    /// plus `ServerSelected` (only when the connection actually changed, so
-    /// returning to the same server from an app page doesn't reload it).
-    fn apply_route(&mut self, route: Route, cx: &mut Context<Self>) {
-        self.route_token = route.as_str().to_string();
-        self.route = route.clone();
-        if let Some((id, db)) = route.server() {
-            let changed = self
-                .selected_server
-                .as_ref()
-                .map(|(sid, sdb)| sid.as_str() != id.as_ref() || *sdb != db)
-                .unwrap_or(true);
-            if changed {
-                self.last_db.insert(id.to_string(), db);
-                self.selected_server = Some((id.to_string(), db));
-                cx.emit(GlobalEvent::ServerSelected(id, db));
-            }
-        }
-        cx.emit(GlobalEvent::RouteChanged(route));
-    }
+
     pub fn go_to(&mut self, route: Route, cx: &mut Context<Self>) {
-        self.go_to_with_query(route, None, cx);
-    }
-    // Tray-only caller (quick-connect menu) — compiled out on Linux
-    // with the tray module.
-    #[cfg(not(target_os = "linux"))]
-    pub fn go_with_query(&mut self, route: Route, query: HashMap<String, String>, cx: &mut Context<Self>) {
-        self.go_to_with_query(route, Some(query), cx);
-    }
-    pub fn get_route_query(&self) -> Option<&HashMap<String, String>> {
-        self.query.as_ref()
-    }
-    /// Switch to a connection-scoped view, keeping the current connection — or,
-    /// from an app page (Settings / Protos / …), the last-active one. No-op
-    /// (with a warning) when no valid connection is known.
-    pub fn go_to_view(&mut self, view: ServerView, cx: &mut Context<Self>) {
-        let conn = self.route.server().or_else(|| {
-            self.selected_server
-                .as_ref()
-                .filter(|(id, _)| get_server(id).is_ok())
-                .map(|(id, db)| (SharedString::from(id.clone()), *db))
-        });
-        let Some((id, db)) = conn else {
-            warn!(view = view.as_str(), "no active server for view; ignoring");
-            return;
-        };
-        self.go_to(Route::Server { id, db, view }, cx);
-    }
-    /// Toggle between a server view and the editor (the status-bar chips).
-    pub fn toggle_view(&mut self, view: ServerView, cx: &mut Context<Self>) {
-        if self.route.server_view() == Some(view) {
-            self.go_to_view(ServerView::Editor, cx);
-        } else {
-            self.go_to_view(view, cx);
-        }
-    }
-    /// Startup activation: (re)apply `route` once the views have subscribed,
-    /// always announcing a server route's connection — `try_new` assembled the
-    /// route silently, before any subscriber existed.
-    pub fn activate(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.route = route;
         self.route_token = route.as_str().to_string();
-        self.route = route.clone();
-        if let Some((id, db)) = route.server() {
-            self.last_db.insert(id.to_string(), db);
-            self.selected_server = Some((id.to_string(), db));
-            cx.emit(GlobalEvent::ServerSelected(id, db));
+        if let Some(slot) = self.open_tabs.get_mut(self.active_tab) {
+            *slot = route.as_str().to_string();
         }
-        cx.emit(GlobalEvent::RouteChanged(route));
+        cx.emit(GlobalEvent::RouteChanged);
         cx.notify();
-        self.persist_nav(cx);
     }
-    /// Effective UI font size in rem px: the slider value if set, else the
-    /// legacy `font_size` enum's pixels, else `None` (falls through to
-    /// `Theme::font_size`, which Zedis pins to [`crate::helpers::DEFAULT_UI_FONT_SIZE`]).
-    pub fn font_rem_px(&self) -> Option<f32> {
-        self.font_rem_px
-            .or_else(|| self.font_size.and_then(FontSize::to_pixels))
+
+    pub fn route(&self) -> Route {
+        self.route
     }
-    pub fn set_font_rem_px(&mut self, px: Option<f32>) {
-        // A value equal to the pinned default carries no information — store None
-        // so the config stays clean and the rem falls back to
-        // DEFAULT_UI_FONT_SIZE via the theme (gpui-component's `Root` sets the rem
-        // base from `theme.font_size` each frame). Mirrors the max_key_tree_depth
-        // "0 ⇒ None" reset. Epsilon compare since the slider steps in whole px and
-        // clippy forbids `==` on f32.
-        self.font_rem_px = px.filter(|v| (*v - DEFAULT_UI_FONT_SIZE).abs() >= f32::EPSILON);
-    }
-    /// UI font family, `None` when unset or blank (falls back to system).
-    pub fn ui_font_family(&self) -> Option<String> {
-        self.ui_font_family.clone().filter(|s| !s.trim().is_empty())
-    }
-    pub fn set_ui_font_family(&mut self, name: Option<String>) {
-        self.ui_font_family = name.filter(|s| !s.trim().is_empty());
-    }
-    /// Monospace font family, `None` when unset or blank (falls back to
-    /// bundled JetBrains Mono).
-    pub fn mono_font_family(&self) -> Option<String> {
-        self.mono_font_family.clone().filter(|s| !s.trim().is_empty())
-    }
-    pub fn set_mono_font_family(&mut self, name: Option<String>) {
-        self.mono_font_family = name.filter(|s| !s.trim().is_empty());
-    }
-    pub fn max_key_tree_depth(&self) -> usize {
-        self.max_key_tree_depth.unwrap_or(5)
-    }
-    pub fn set_max_key_tree_depth(&mut self, max_key_tree_depth: usize) {
-        if max_key_tree_depth == 0 {
-            self.max_key_tree_depth = None;
-            return;
-        }
-        self.max_key_tree_depth = Some(max_key_tree_depth);
-    }
-    pub fn set_redis_connection_timeout(&mut self, redis_connection_timeout: Option<Duration>) {
-        if let Some(redis_connection_timeout) = redis_connection_timeout {
-            set_redis_connection_timeout(redis_connection_timeout);
-        }
-        self.redis_connection_timeout = redis_connection_timeout;
-    }
-    pub fn set_redis_response_timeout(&mut self, redis_response_timeout: Option<Duration>) {
-        if let Some(redis_response_timeout) = redis_response_timeout {
-            set_redis_response_timeout(redis_response_timeout);
-        }
-        self.redis_response_timeout = redis_response_timeout;
-    }
+
     pub fn theme(&self) -> Option<ThemeMode> {
         match self.theme.as_deref() {
             Some(LIGHT_THEME_MODE) => Some(ThemeMode::Light),
@@ -939,839 +306,232 @@ impl ZedisAppState {
             _ => None,
         }
     }
-    /// The selected named theme, if any (overrides the Light/Dark/System mode).
+
+    pub fn set_theme(&mut self, mode: ThemeMode) {
+        self.theme_name = None;
+        self.theme = Some(
+            match mode {
+                ThemeMode::Light => LIGHT_THEME_MODE,
+                ThemeMode::Dark => DARK_THEME_MODE,
+            }
+            .to_string(),
+        );
+    }
+
+    pub fn set_theme_system(&mut self) {
+        self.theme_name = None;
+        self.theme = Some("system".to_string());
+    }
+
     pub fn theme_name(&self) -> Option<String> {
         self.theme_name.clone()
     }
-    pub fn set_theme_name(&mut self, name: Option<String>) {
-        self.theme_name = name;
+
+    pub fn set_theme_name(&mut self, name: String) {
+        self.theme_name = Some(name);
     }
-    /// The UI language: the saved choice when it is a bundled locale, else
-    /// the OS language clamped to one (never a code the app can't render).
+
     pub fn locale(&self) -> &str {
-        match self.locale.as_deref() {
-            Some(locale) if SUPPORTED_LOCALES.contains(&locale) => locale,
-            _ => system_language(),
+        self.locale.as_deref().unwrap_or("en")
+    }
+
+    pub fn set_locale(&mut self, locale: String) {
+        self.locale = Some(locale);
+    }
+
+    pub fn font_rem_px(&self) -> Option<f32> {
+        self.font_rem_px
+    }
+
+    pub fn set_font_rem_px(&mut self, px: f32) {
+        self.font_rem_px = Some(px);
+    }
+
+    pub fn ui_font_family(&self) -> Option<String> {
+        self.ui_font_family.clone()
+    }
+
+    pub fn mono_font_family(&self) -> Option<String> {
+        self.mono_font_family.clone()
+    }
+
+    pub fn http_proxy(&self) -> String {
+        self.http_proxy.clone().unwrap_or_default()
+    }
+
+    pub fn set_http_proxy(&mut self, value: String) {
+        self.http_proxy = if value.trim().is_empty() { None } else { Some(value) };
+    }
+
+    pub fn tray_enabled(&self) -> bool {
+        self.tray_enabled.unwrap_or(false)
+    }
+
+    pub fn set_tray_enabled(&mut self, enabled: bool) {
+        self.tray_enabled = Some(enabled);
+    }
+
+    pub fn auto_update_check(&self) -> bool {
+        self.auto_update_check.unwrap_or(true)
+    }
+
+    pub fn set_auto_update_check(&mut self, enabled: bool) {
+        self.auto_update_check = Some(enabled);
+    }
+
+    pub fn include_prerelease(&self) -> bool {
+        self.include_prerelease.unwrap_or(false)
+    }
+
+    pub fn set_include_prerelease(&mut self, enabled: bool) {
+        self.include_prerelease = Some(enabled);
+    }
+
+    pub fn update_check_due(&self) -> bool {
+        match self.last_update_check {
+            Some(ts) => unix_ts() - ts >= UPDATE_CHECK_INTERVAL,
+            None => true,
         }
+    }
+
+    pub fn mark_update_checked(&mut self) {
+        self.last_update_check = Some(unix_ts());
+    }
+
+    pub fn set_skipped_update_version(&mut self, version: Option<String>) {
+        self.skipped_update_version = version;
+    }
+
+    pub fn time_zone(&self) -> TimeZonePref {
+        TimeZonePref::from_name(self.time_zone.as_deref().unwrap_or("local"))
+    }
+
+    pub fn set_time_zone(&mut self, zone: TimeZonePref) {
+        self.time_zone = Some(zone.name().to_string());
+    }
+
+    pub fn date_format(&self) -> String {
+        self.date_format.clone().unwrap_or_else(|| "iso".to_string())
+    }
+
+    pub fn set_date_format(&mut self, id: String) {
+        self.date_format = Some(id);
+    }
+
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.sidebar_collapsed.unwrap_or(false)
+    }
+
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        self.sidebar_collapsed = Some(collapsed);
+    }
+
+    pub fn sidebar_px(&self) -> Pixels {
+        if self.sidebar_collapsed() {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        }
+    }
+
+    pub fn bounds(&self) -> Option<&Bounds<Pixels>> {
+        self.bounds.as_ref()
     }
 
     pub fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
         self.bounds = Some(bounds);
     }
+
     pub fn window_placements(&self) -> &[WindowPlacement] {
         &self.window_placements
     }
-    /// Upsert a per-display placement: drop any prior entry for the same display,
-    /// move it to the front (most-recently-used), and keep at most
-    /// `MAX_WINDOW_PLACEMENTS` distinct displays.
-    pub fn upsert_window_placement(&mut self, mut placement: WindowPlacement) {
-        // A maximized window reports the display rectangle as its bounds;
-        // keep the windowed rectangle we already had for that display, so a
-        // later un-maximize (and the next launch, once un-maximized) lands
-        // where the user left the window.
-        if placement.maximized
-            && let Some(previous) = self
-                .window_placements
-                .iter()
-                .find(|p| p.display_uuid == placement.display_uuid)
-        {
-            placement.bounds = previous.bounds;
-        }
+
+    pub fn remember_placement(&mut self, placement: WindowPlacement) {
         self.window_placements
             .retain(|p| p.display_uuid != placement.display_uuid);
         self.window_placements.insert(0, placement);
         self.window_placements.truncate(MAX_WINDOW_PLACEMENTS);
     }
-    pub fn set_theme(&mut self, theme: Option<ThemeMode>) {
-        // Picking a Light/Dark/System mode clears any named theme so the mode
-        // actually takes effect (the two are mutually exclusive).
-        self.theme_name = None;
-        match theme {
-            Some(ThemeMode::Light) => {
-                self.theme = Some(LIGHT_THEME_MODE.to_string());
-            }
-            Some(ThemeMode::Dark) => {
-                self.theme = Some(DARK_THEME_MODE.to_string());
-            }
-            _ => {
-                self.theme = None;
-            }
-        }
-    }
-    pub fn set_locale(&mut self, locale: String) {
-        self.locale = Some(locale);
-    }
-    pub fn max_truncate_length(&self) -> usize {
-        self.max_truncate_length.unwrap_or(1000)
-    }
-    pub fn set_max_truncate_length(&mut self, max_truncate_length: usize) {
-        // 0 means "reset to default" (cleared input) — store None.
-        if max_truncate_length == 0 {
-            self.max_truncate_length = None;
-            return;
-        }
-        self.max_truncate_length = Some(max_truncate_length);
-    }
-    pub fn redis_connection_timeout(&self) -> String {
-        self.redis_connection_timeout
-            .map(|timeout| timeout.as_secs().to_string())
-            .unwrap_or_default()
-    }
-    pub fn redis_response_timeout(&self) -> String {
-        self.redis_response_timeout
-            .map(|timeout| timeout.as_secs().to_string())
-            .unwrap_or_default()
-    }
-    pub fn key_scan_count(&self) -> usize {
-        self.key_scan_count.unwrap_or(10_000)
-    }
-    pub fn multi_search_scope(&self) -> MultiSearchScope {
-        self.multi_search_scope.clone()
-    }
-    pub fn set_multi_search_scope(&mut self, scope: MultiSearchScope) {
-        self.multi_search_scope = scope;
-    }
-    pub fn multi_search_scan_count(&self) -> usize {
-        // Per-server result cap. Defaults low: the palette's primary path
-        // is the exact lookup; SCAN is discovery, and 10 hits per server
-        // is usually enough to spot the right key — raise it (persisted)
-        // when it isn't.
-        self.multi_search_scan_count.unwrap_or(10)
-    }
-    pub fn set_multi_search_scan_count(&mut self, count: usize) {
-        // 0 = "reset to default" (cleared input); otherwise clamp to a
-        // sane per-server range so a typo can't turn SCAN into a flood.
-        self.multi_search_scan_count = if count == 0 { None } else { Some(count.clamp(10, 5_000)) };
-    }
-    /// Arm the "select this key once its server connects" handoff.
-    pub fn set_multi_search_pending_key(&mut self, server_id: String, db: usize, key: String) {
-        self.multi_search_pending_key = Some((server_id, db, key));
-    }
-    /// Consume the pending selection if it matches the connection that
-    /// just came up; a mismatch leaves it armed (another select is
-    /// still in flight) — it's runtime-only state either way.
-    pub fn take_multi_search_pending_key(&mut self, server_id: &str, db: usize) -> Option<String> {
-        match &self.multi_search_pending_key {
-            Some((sid, sdb, _)) if sid == server_id && *sdb == db => {
-                self.multi_search_pending_key.take().map(|(_, _, key)| key)
-            }
-            _ => None,
-        }
-    }
-    pub fn value_search_scan_cap(&self) -> usize {
-        self.value_search_scan_cap.unwrap_or(10_000)
-    }
-    pub fn set_value_search_scan_cap(&mut self, cap: usize) {
-        // 0 = "reset to default" (cleared input); clamped so a typo can't
-        // turn one search into an unbounded keyspace walk.
-        self.value_search_scan_cap = if cap == 0 {
-            None
-        } else {
-            Some(cap.clamp(1_000, 1_000_000))
-        };
-    }
-    pub fn value_search_time_budget_secs(&self) -> u64 {
-        self.value_search_time_budget_secs.unwrap_or(10)
-    }
-    pub fn set_value_search_time_budget_secs(&mut self, secs: u64) {
-        self.value_search_time_budget_secs = if secs == 0 { None } else { Some(secs.clamp(3, 300)) };
-    }
-    pub fn value_search_max_matches(&self) -> usize {
-        self.value_search_max_matches.unwrap_or(500)
-    }
-    pub fn set_value_search_max_matches(&mut self, max: usize) {
-        self.value_search_max_matches = if max == 0 { None } else { Some(max.clamp(50, 10_000)) };
-    }
-    pub fn set_key_scan_count(&mut self, key_scan_count: usize) {
-        // 0 means "reset to default" (cleared input) — store None so the
-        // getter's default applies.
-        if key_scan_count == 0 {
-            self.key_scan_count = None;
-            return;
-        }
-        self.key_scan_count = Some(key_scan_count);
-    }
-    pub fn auto_expand_threshold(&self) -> usize {
-        self.auto_expand_threshold.unwrap_or(100)
-    }
-    pub fn set_auto_expand_threshold(&mut self, auto_expand_threshold: usize) {
-        // 0 means "reset to default" (cleared input) — store None.
-        if auto_expand_threshold == 0 {
-            self.auto_expand_threshold = None;
-            return;
-        }
-        self.auto_expand_threshold = Some(auto_expand_threshold);
-    }
-    pub fn tray_enabled(&self) -> bool {
-        self.tray_enabled.unwrap_or(true)
-    }
-    pub fn set_tray_enabled(&mut self, enabled: bool) {
-        self.tray_enabled = Some(enabled);
-    }
-    pub fn sidebar_click_new_tab(&self) -> bool {
-        self.sidebar_click_new_tab.unwrap_or(false)
-    }
-    pub fn set_sidebar_click_new_tab(&mut self, enabled: bool) {
-        self.sidebar_click_new_tab = Some(enabled);
-    }
-    pub fn soft_delete(&self) -> bool {
-        self.soft_delete.unwrap_or(true)
-    }
-    pub fn set_soft_delete(&mut self, enabled: bool) {
-        self.soft_delete = Some(enabled);
-    }
-    pub fn show_key_tree_ttl(&self) -> bool {
-        self.show_key_tree_ttl.unwrap_or(true)
-    }
-    pub fn set_show_key_tree_ttl(&mut self, enabled: bool) {
-        self.show_key_tree_ttl = Some(enabled);
-    }
-    /// Whether the navigation sidebar is collapsed to an icon-only rail.
-    pub fn sidebar_collapsed(&self) -> bool {
-        self.sidebar_collapsed.unwrap_or(false)
-    }
-    pub fn toggle_sidebar_collapsed(&mut self) {
-        self.sidebar_collapsed = Some(!self.sidebar_collapsed());
-    }
-    /// Base URL of the OpenAI-compatible AI endpoint (without trailing
-    /// slash normalization — that happens at request time). Empty when
-    /// unset.
-    /// The persisted proxy setting (decrypted when stored encrypted), or
-    /// empty when following the system. Falls back to the stored value if
-    /// decryption fails (e.g. a hand-edited plaintext URI in `zedis.toml`).
-    /// `zedis.toml` as it would be saved, with the two secrets — the AI API
-    /// key and any proxy credentials — replaced, for the diagnostics bundle.
-    pub fn redacted_toml(&self) -> Result<String> {
-        let mut copy = self.clone();
-        copy.ai_api_key = copy.ai_api_key.as_ref().map(|_| "<redacted>".to_string());
-        // Stored encrypted, but a `user:pass@` proxy is still a secret.
-        copy.http_proxy = copy.http_proxy.as_ref().map(|_| "<redacted>".to_string());
-        Ok(toml::to_string(&copy)?)
-    }
 
-    pub fn http_proxy(&self) -> String {
-        self.http_proxy
-            .as_ref()
-            .map(|stored| decrypt(stored).unwrap_or_else(|_| stored.clone()))
-            .unwrap_or_default()
-    }
-    /// Persist the proxy setting and mirror the plaintext into
-    /// `helpers::proxy` so the next HTTP request (updater / AI, background
-    /// threads without `cx`) picks it up immediately. A URI carrying
-    /// credentials (`user:pass@` userinfo) is encrypted like `ai_api_key`;
-    /// a credential-free address stays readable in `zedis.toml`.
-    pub fn set_http_proxy(&mut self, value: String) {
-        let value = value.trim().to_string();
-        set_configured_proxy(&value);
-        self.http_proxy = if value.is_empty() {
-            None
-        } else if value.contains('@') {
-            Some(encrypt(&value).unwrap_or_else(|_| value.clone()))
-        } else {
-            Some(value)
-        };
-    }
-
-    pub fn ai_base_url(&self) -> String {
-        self.ai_base_url.clone().unwrap_or_default()
-    }
-    pub fn set_ai_base_url(&mut self, base_url: String) {
-        let base_url = base_url.trim().to_string();
-        self.ai_base_url = if base_url.is_empty() { None } else { Some(base_url) };
-    }
-    /// Decrypted API key for the AI endpoint, or empty when unset.
-    /// Falls back to the stored value if decryption fails (e.g. a
-    /// hand-edited plaintext key in `zedis.toml`).
-    pub fn ai_api_key(&self) -> String {
-        self.ai_api_key
-            .as_ref()
-            .map(|cipher| decrypt(cipher).unwrap_or_else(|_| cipher.clone()))
-            .unwrap_or_default()
-    }
-    /// Store the API key, encrypting it before persistence. An empty
-    /// value clears it.
-    pub fn set_ai_api_key(&mut self, api_key: String) {
-        let api_key = api_key.trim();
-        self.ai_api_key = if api_key.is_empty() {
-            None
-        } else {
-            Some(encrypt(api_key).unwrap_or_else(|_| api_key.to_string()))
-        };
-    }
-    /// Model name passed to the AI endpoint. Empty when unset.
-    pub fn ai_model(&self) -> String {
-        self.ai_model.clone().unwrap_or_default()
-    }
-    pub fn set_ai_model(&mut self, model: String) {
-        let model = model.trim().to_string();
-        self.ai_model = if model.is_empty() { None } else { Some(model) };
-    }
-    /// Whether the AI features have the minimum configuration to be
-    /// usable: an endpoint. The key is optional — a local endpoint (Ollama,
-    /// LM Studio, vLLM without auth) takes none, and used to need a fake
-    /// one typed in just to pass this check.
-    pub fn ai_configured(&self) -> bool {
-        self.ai_base_url.is_some()
-    }
-    /// The terminal's reply rendering; text unless a known name is stored.
-    pub fn terminal_reply_format(&self) -> ReplyFormat {
-        self.terminal_reply_format
-            .as_deref()
-            .and_then(ReplyFormat::from_name)
-            .unwrap_or_default()
-    }
-    pub fn set_terminal_reply_format(&mut self, format: ReplyFormat) {
-        self.terminal_reply_format = Some(format.as_str().to_string());
-    }
-    /// Whether the app checks GitHub for a newer release on startup. Defaults
-    /// to `true`; the user can disable it in Settings.
-    pub fn auto_update_check(&self) -> bool {
-        self.auto_update_check.unwrap_or(true)
-    }
-    pub fn set_auto_update_check(&mut self, enabled: bool) {
-        self.auto_update_check = Some(enabled);
-    }
-    /// Whether the update check also considers pre-releases and the nightly
-    /// build. A nightly build defaults to yes — the stable channel would
-    /// never offer it anything.
-    pub fn update_prerelease(&self) -> bool {
-        self.update_prerelease.unwrap_or_else(is_nightly_build)
-    }
-    pub fn set_update_prerelease(&mut self, enabled: bool) {
-        self.update_prerelease = Some(enabled);
-    }
-    pub fn time_zone(&self) -> TimeZonePref {
-        self.time_zone
-            .as_deref()
-            .map(TimeZonePref::from_name)
-            .unwrap_or_default()
-    }
-    pub fn set_time_zone(&mut self, zone: TimeZonePref) {
-        self.time_zone = Some(zone.name().to_string());
-    }
-    pub fn date_format(&self) -> String {
-        self.date_format
-            .clone()
-            .unwrap_or_else(|| DEFAULT_DATE_FORMAT.to_string())
-    }
-    pub fn set_date_format(&mut self, id: &str) {
-        self.date_format = Some(id.to_string());
-    }
-    /// Whether a startup update check is due: never run, or longer than
-    /// [`UPDATE_CHECK_INTERVAL`] ago.
-    pub fn update_check_due(&self) -> bool {
-        match self.last_update_check {
-            Some(ts) => unix_ts().saturating_sub(ts) >= UPDATE_CHECK_INTERVAL,
-            None => true,
-        }
-    }
-    /// Record that an update check just ran, resetting the throttle.
-    pub fn mark_update_checked(&mut self) {
-        self.last_update_check = Some(unix_ts());
-    }
-    /// Whether a one-time onboarding hint has already been shown.
     pub fn hint_dismissed(&self, key: &str) -> bool {
-        self.dismissed_hints
-            .as_ref()
-            .is_some_and(|list| list.iter().any(|k| k == key))
+        self.dismissed_hints.iter().any(|h| h == key)
     }
-    /// Mark a one-time onboarding hint as seen so it never fires again.
+
     pub fn dismiss_hint(&mut self, key: &str) {
-        let list = self.dismissed_hints.get_or_insert_default();
-        if !list.iter().any(|k| k == key) {
-            list.push(key.to_string());
+        if !self.hint_dismissed(key) {
+            self.dismissed_hints.push(key.to_string());
         }
     }
-    /// Whether the user chose to skip this exact version.
-    pub fn update_skipped(&self, version: &str) -> bool {
-        self.skipped_version.as_deref() == Some(version)
+
+    pub fn open_tabs(&self) -> &[String] {
+        &self.open_tabs
     }
-    pub fn set_skipped_version(&mut self, version: String) {
-        self.skipped_version = if version.is_empty() { None } else { Some(version) };
+
+    pub fn active_tab(&self) -> usize {
+        self.active_tab.min(self.open_tabs.len().saturating_sub(1))
     }
-    /// The pending update in full (version, changelog, per-arch asset) — the
-    /// check already fetched all of it, so the prompt can open straight from
-    /// here instead of going back to the network.
-    pub fn available_update(&self) -> Option<UpdateInfo> {
-        self.available_update.clone()
+
+    pub fn set_open_tabs(&mut self, tabs: Vec<String>, active: usize) {
+        self.open_tabs = tabs;
+        self.active_tab = active;
     }
-    /// Just the version string of the pending update — for the status-bar chip.
-    pub fn available_update_version(&self) -> Option<SharedString> {
-        self.available_update
-            .as_ref()
-            .map(|info| SharedString::from(info.version.clone()))
-    }
-    /// Set (or clear with `None`) the pending update and broadcast it so the
-    /// status-bar chip lights up / clears.
-    pub fn set_available_update(&mut self, info: Option<UpdateInfo>, cx: &mut Context<Self>) {
-        self.available_update = info;
-        cx.emit(GlobalEvent::UpdateAvailable);
-    }
-    /// Current installer download progress as `(downloaded, total)` bytes, or
-    /// `None` when not downloading. `total` is always > 0 while downloading.
+
     pub fn download_progress(&self) -> Option<(u64, u64)> {
         self.download_progress
     }
-    /// The same progress as a 0–100 percentage — what the title-bar chip shows.
-    pub fn download_percent(&self) -> Option<u8> {
-        self.download_progress
-            .filter(|(_, total)| *total > 0)
-            .map(|(done, total)| (done * 100 / total).min(100) as u8)
-    }
-    /// Set (or clear with `None`) the download progress and broadcast it so the
-    /// update dialog's progress bar and the title-bar chip both refresh.
+
     pub fn set_download_progress(&mut self, progress: Option<(u64, u64)>, cx: &mut Context<Self>) {
         self.download_progress = progress;
         cx.emit(GlobalEvent::UpdateDownloadProgress);
+        cx.notify();
     }
-    /// macOS: the downloaded update was installed in place — the update
-    /// dialog swaps its progress bar for the Restart / Later row instead
-    /// of closing (closing targets the *topmost* dialog, so opening a
-    /// separate restart dialog raced the self-close and lost). Runtime
-    /// only.
+
     pub fn update_installed(&self) -> bool {
         self.update_installed
     }
+
     pub fn set_update_installed(&mut self, installed: bool, cx: &mut Context<Self>) {
         self.update_installed = installed;
-        // Same event the dialog already subscribes to for progress ticks.
-        cx.emit(GlobalEvent::UpdateDownloadProgress);
+        cx.notify();
     }
-    /// Whether an update check (network fetch) is currently running.
+
     pub fn update_checking(&self) -> bool {
         self.update_checking
     }
-    /// Set the "checking for updates" flag and broadcast it so the update chip
-    /// can show / clear its loading spinner.
+
     pub fn set_update_checking(&mut self, checking: bool, cx: &mut Context<Self>) {
         self.update_checking = checking;
-        cx.emit(GlobalEvent::UpdateAvailable);
+        cx.notify();
     }
-    /// Whether the given server-page group section is collapsed.
-    pub fn is_server_group_collapsed(&self, key: &str) -> bool {
-        self.collapsed_server_groups
-            .as_ref()
-            .is_some_and(|groups| groups.iter().any(|g| g == key))
+
+    pub fn available_update(&self) -> Option<UpdateInfo> {
+        self.available_update.clone()
     }
-    /// Flip the collapsed state of a server-page group section.
-    pub fn toggle_server_group_collapsed(&mut self, key: &str) {
-        let groups = self.collapsed_server_groups.get_or_insert_with(Vec::new);
-        if let Some(pos) = groups.iter().position(|g| g == key) {
-            groups.swap_remove(pos);
-        } else {
-            groups.push(key.to_string());
+
+    pub fn set_available_update(&mut self, info: Option<UpdateInfo>, cx: &mut Context<Self>) {
+        self.available_update = info;
+        cx.notify();
+    }
+
+    pub fn update_skipped(&self, version: &str) -> bool {
+        self.skipped_update_version.as_deref() == Some(version)
+    }
+
+    pub fn redacted_toml(&self) -> String {
+        let mut clone = self.clone();
+        if clone.http_proxy.as_ref().is_some_and(|p| !p.is_empty()) {
+            clone.http_proxy = Some("***".into());
         }
-    }
-    pub fn selected_server(&self) -> Option<&(String, usize)> {
-        self.selected_server.as_ref()
-    }
-    /// The DB to open this server on when the caller has no DB of its own:
-    /// the server's pinned `default_db` when configured, else the DB it was
-    /// last viewed on (0 if never).
-    ///
-    /// Every "connect to server X" entry point (sidebar, server card, tray,
-    /// palette, multi-search) resolves through here. A DB the user picked
-    /// *explicitly* — the status-bar switcher, `--db`, a workspace tab
-    /// already bound to one — bypasses it and stands.
-    pub fn open_db_for(&self, server_id: &str) -> usize {
-        self.open_db_from(server_id, self.last_db.get(server_id).copied().unwrap_or(0))
-    }
-    /// [`Self::open_db_for`] for a caller that already holds a remembered DB
-    /// (the restored session snapshot / a restored tab): the pin still wins,
-    /// since it means "always this DB", but an unpinned server keeps the DB
-    /// it was left on.
-    pub fn open_db_from(&self, server_id: &str, remembered: usize) -> usize {
-        get_server(server_id)
-            .map(|server| server.resolve_default_db(remembered))
-            .unwrap_or(remembered)
-    }
-    pub fn kv_edit_panel_width(&self) -> Option<Pixels> {
-        self.kv_edit_panel_width
-    }
-    pub fn set_kv_edit_panel_width(&mut self, width: Pixels) {
-        self.kv_edit_panel_width = Some(width);
-    }
-    /// The persisted workspace-tab list — see the `open_tabs` field.
-    pub fn open_tabs(&self) -> &[(String, usize)] {
-        &self.open_tabs
-    }
-    pub fn set_open_tabs(&mut self, open_tabs: Vec<(String, usize)>) {
-        self.open_tabs = open_tabs;
-    }
-    /// Drop the active connection (Home click): clear the snapshot, announce
-    /// the empty selection, and route to Home.
-    pub fn clear_selected_server(&mut self, cx: &mut Context<Self>) {
-        self.selected_server = None;
-        cx.emit(GlobalEvent::ServerSelected(SharedString::default(), 0));
-        self.go_to(Route::Home, cx);
-    }
-    /// Connect to a server, landing on the editor — the sidebar / server-card
-    /// / palette / tray entry points. The status-bar DB switch, which keeps
-    /// the current view, goes through `set_selected_server` instead.
-    ///
-    /// These entry points mean "(re)connect", not just "navigate", so the
-    /// selection is announced *unconditionally* before routing. `apply_route`'s
-    /// dedupe compares against the persisted `selected_server` snapshot, which
-    /// after a restart can point at this server while nothing is loaded in the
-    /// session yet — relying on it alone would skip the `ServerSelected` that
-    /// actually loads the connection (the "tray click does nothing" bug).
-    pub fn connect_server(&mut self, id: String, db: usize, cx: &mut Context<Self>) {
-        self.last_db.insert(id.clone(), db);
-        self.selected_server = Some((id.clone(), db));
-        cx.emit(GlobalEvent::ServerSelected(id.clone().into(), db));
-        self.go_to(
-            Route::Server {
-                id: id.into(),
-                db,
-                view: ServerView::Editor,
-            },
-            cx,
-        );
-    }
-    /// Reveal the tab already bound to `(id, db)`, or open a new one when none
-    /// exists (sidebar ⌘/Ctrl+click). The root (`Zedis` in main.rs) owns the
-    /// tab list, so this only broadcasts the request; the root re-activates or
-    /// creates the tab and then projects the selection back through
-    /// `connect_server`.
-    pub fn reveal_or_open_server_tab(&mut self, id: String, db: usize, cx: &mut Context<Self>) {
-        cx.emit(GlobalEvent::ServerOpenInNewTab(id.into(), db, false));
-    }
-    /// Always open `(id, db)` in a fresh workspace tab, even when one is already
-    /// bound to it (sidebar ⌘/Ctrl+Shift+click) — lets the user run two
-    /// workspaces on the same connection. Same broadcast path as
-    /// [`Self::reveal_or_open_server_tab`], with dedup skipped by the root.
-    pub fn open_server_in_new_tab(&mut self, id: String, db: usize, cx: &mut Context<Self>) {
-        cx.emit(GlobalEvent::ServerOpenInNewTab(id.into(), db, true));
-    }
-    /// Activate a connection: routes to it, keeping the current server view
-    /// when one is active (the status-bar DB switch) and falling back to the
-    /// editor otherwise (sidebar / server-card / tray connects). Route
-    /// transition, snapshot, `last_db` and persistence all flow through
-    /// `apply_route`.
-    pub fn set_selected_server(&mut self, selected_server: (String, usize), cx: &mut Context<Self>) {
-        let (server_id, db) = selected_server;
-        if server_id.is_empty() {
-            return self.clear_selected_server(cx);
-        }
-        let view = self.route.server_view().unwrap_or(ServerView::Editor);
-        self.go_to(
-            Route::Server {
-                id: server_id.into(),
-                db,
-                view,
-            },
-            cx,
-        );
-    }
-    pub fn remove_server(&mut self, id: &str, cx: &mut Context<Self>) {
-        let id = id.to_string();
-        cx.spawn(async move |handle, cx| {
-            let task = cx.background_spawn(async move {
-                let mut servers = get_servers()?;
-                servers.retain(|s| s.id != id);
-                save_servers(servers.clone()).await?;
-                Ok(())
-            });
-            let result: Result<()> = task.await;
-            if let Err(e) = &result {
-                error!(error = %e, "Failed to remove server");
-            }
-            handle.update(cx, |_this, cx| {
-                cx.emit(GlobalEvent::ServerListUpdated);
-                cx.notify();
-            })
-        })
-        .detach();
-    }
-    /// Swap the `sort_order` of `server_id` with the adjacent neighbor
-    /// in the same `group`, in the requested direction. No-op at the
-    /// edge of the group. Persists and broadcasts `ServerListUpdated`
-    /// so the grid re-renders in the new order.
-    ///
-    /// Implementation note: instead of swapping just two sort_order
-    /// values, we (a) collect the in-group entries in their current
-    /// sorted-on-display order, (b) renumber the entire group as
-    /// `0..n` so legacy entries with `sort_order: None` get real
-    /// values, then (c) perform the index swap. This guarantees the
-    /// operation is observable even on data saved before this field
-    /// existed (everyone tied at `None` would otherwise no-op).
-    pub fn reorder_server(&mut self, server_id: &str, direction: ReorderDirection, cx: &mut Context<Self>) {
-        let server_id = server_id.to_string();
-        cx.spawn(async move |handle, cx| {
-            let task = cx.background_spawn(async move {
-                let mut servers = get_servers()?;
-                let Some(target_idx) = servers.iter().position(|s| s.id == server_id) else {
-                    return Ok::<(), Error>(());
-                };
-                let group_key = servers[target_idx]
-                    .group
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                let in_same_group = |s: &RedisServer| {
-                    s.group
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|g| !g.is_empty())
-                        .map(String::from)
-                        == group_key
-                };
-
-                // (a) Collect indices belonging to the target's group,
-                // in current display order. `get_servers()` already
-                // returns canonical sort order, so this list is
-                // monotonic.
-                let group_indices: Vec<usize> = servers
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| in_same_group(s))
-                    .map(|(i, _)| i)
-                    .collect();
-                let Some(pos_in_group) = group_indices.iter().position(|&i| i == target_idx) else {
-                    return Ok(());
-                };
-
-                // (c) Determine the swap partner's position in-group.
-                let swap_pos = match direction {
-                    ReorderDirection::Up if pos_in_group > 0 => pos_in_group - 1,
-                    ReorderDirection::Down if pos_in_group + 1 < group_indices.len() => pos_in_group + 1,
-                    _ => return Ok(()), // at edge — nothing to do
-                };
-
-                // (b) Renumber 0..n in current order, then write the
-                // swapped positions back. This means even legacy data
-                // (`sort_order: None`) ends up with a stable, distinct
-                // sort_order after the first reorder click.
-                let mut new_order: Vec<i64> = (0..group_indices.len() as i64).collect();
-                new_order.swap(pos_in_group, swap_pos);
-                for (slot, &server_idx) in group_indices.iter().enumerate() {
-                    servers[server_idx].sort_order = Some(new_order[slot]);
-                }
-
-                save_servers(servers).await?;
-                Ok(())
-            });
-            let _: Result<()> = task.await;
-            handle.update(cx, |_this, cx| {
-                cx.emit(GlobalEvent::ServerListUpdated);
-                cx.notify();
-            })
-        })
-        .detach();
-    }
-
-    /// Deep link (`redis://…` from the OS or a second launch). The saved
-    /// connection with the same host / port / TLS / user wins — a link
-    /// carries no name, so that is its identity — otherwise the link is
-    /// saved as a new connection; either way the editor opens on it, in the
-    /// link's `/db` when it names one.
-    pub fn open_server_from_uri(&mut self, server: RedisServer, cx: &mut Context<Self>) {
-        let db = server.default_db.map(usize::from);
-        let existing = get_servers().ok().and_then(|servers| {
-            servers.into_iter().find(|saved| {
-                saved.host == server.host
-                    && saved.port == server.port
-                    && saved.tls.unwrap_or(false) == server.tls.unwrap_or(false)
-                    && saved.username == server.username
-            })
-        });
-        if let Some(found) = existing {
-            let db = db.unwrap_or_else(|| self.open_db_for(&found.id));
-            self.go_to(
-                Route::Server {
-                    id: found.id.into(),
-                    db,
-                    view: ServerView::Editor,
-                },
-                cx,
-            );
-            return;
-        }
-        let id = server.id.clone();
-        self.upsert_server_then(server, cx, move |state, cx| {
-            let db = db.unwrap_or_else(|| state.open_db_for(&id));
-            state.go_to(
-                Route::Server {
-                    id: id.into(),
-                    db,
-                    view: ServerView::Editor,
-                },
-                cx,
-            );
-        });
-    }
-
-    pub fn upsert_server(&mut self, server: RedisServer, cx: &mut Context<Self>) {
-        self.upsert_server_then(server, cx, |_, _| {});
-    }
-
-    /// [`Self::upsert_server`] plus a continuation that runs once the list
-    /// is saved — the moment a freshly added server can be selected.
-    fn upsert_server_then(
-        &mut self,
-        mut server: RedisServer,
-        cx: &mut Context<Self>,
-        after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
-    ) {
-        if server.id.is_empty() {
-            server.id = Uuid::now_v7().to_string();
-        }
-        server.updated_at = Some(Local::now().to_string());
-        cx.spawn(async move |handle, cx| {
-            let task = cx.background_spawn(async move {
-                if server.name.is_empty() {
-                    return Err(Error::Invalid {
-                        message: "Server name is required".to_string(),
-                    });
-                }
-                let mut servers = get_servers()?;
-                if let Some(existing_server) = servers.iter_mut().find(|s| s.id == server.id) {
-                    // Preserve the existing sort_order on update unless
-                    // the caller explicitly supplied one (reorder
-                    // buttons set it; the edit form leaves it None).
-                    if server.sort_order.is_none() {
-                        server.sort_order = existing_server.sort_order;
-                    }
-                    *existing_server = server;
-                } else {
-                    // New server: append to the tail of its group by
-                    // assigning max(sort_order)+1 within that group.
-                    if server.sort_order.is_none() {
-                        let new_group = server.group.as_deref().map(str::trim).filter(|s| !s.is_empty());
-                        let next = servers
-                            .iter()
-                            .filter(|s| s.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) == new_group)
-                            .filter_map(|s| s.sort_order)
-                            .max()
-                            .map(|m| m + 1)
-                            .unwrap_or(0);
-                        server.sort_order = Some(next);
-                    }
-                    servers.push(server);
-                }
-                save_servers(servers.clone()).await?;
-                Ok(())
-            });
-            let result: Result<()> = task.await;
-
-            handle.update(cx, |this, cx| {
-                if let Err(e) = &result {
-                    error!(error = %e, "Failed to upsert server");
-                    cx.emit(GlobalEvent::Notification(NotificationAction::new_error(
-                        e.to_string().into(),
-                    )));
-                    return;
-                }
-                cx.emit(GlobalEvent::ServerListUpdated);
-                cx.notify();
-                after(this, cx);
-            })
-        })
-        .detach();
-    }
-
-    /// Insert or update **multiple** servers in one atomic read-modify-save.
-    ///
-    /// Calling [`Self::upsert_server`] in a loop races: each call is an
-    /// independent detached task that reads the whole list, appends one entry,
-    /// and writes the list back — so concurrent saves clobber each other and
-    /// only one entry survives. Batching reads the list once and saves once.
-    pub fn upsert_servers(&mut self, servers: Vec<RedisServer>, cx: &mut Context<Self>) {
-        if servers.is_empty() {
-            return;
-        }
-        cx.spawn(async move |handle, cx| {
-            let task = cx.background_spawn(async move {
-                let mut current = get_servers()?;
-                for mut server in servers {
-                    // Skip nameless entries rather than abort the whole batch.
-                    if server.name.is_empty() {
-                        continue;
-                    }
-                    if server.id.is_empty() {
-                        server.id = Uuid::now_v7().to_string();
-                    }
-                    server.updated_at = Some(Local::now().to_string());
-                    if let Some(existing) = current.iter_mut().find(|s| s.id == server.id) {
-                        if server.sort_order.is_none() {
-                            server.sort_order = existing.sort_order;
-                        }
-                        *existing = server;
-                    } else {
-                        // Append to the tail of its group; `sort_order` is
-                        // computed against the in-progress list so a batch
-                        // gets sequential indices.
-                        if server.sort_order.is_none() {
-                            let new_group = server.group.as_deref().map(str::trim).filter(|s| !s.is_empty());
-                            let next = current
-                                .iter()
-                                .filter(|s| s.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) == new_group)
-                                .filter_map(|s| s.sort_order)
-                                .max()
-                                .map(|m| m + 1)
-                                .unwrap_or(0);
-                            server.sort_order = Some(next);
-                        }
-                        current.push(server);
-                    }
-                }
-                save_servers(current.clone()).await?;
-                Ok(())
-            });
-            let result: Result<()> = task.await;
-
-            handle.update(cx, |_this, cx| {
-                if let Err(e) = &result {
-                    error!(error = %e, "Failed to upsert servers");
-                    cx.emit(GlobalEvent::Notification(NotificationAction::new_error(
-                        e.to_string().into(),
-                    )));
-                    return;
-                }
-                cx.emit(GlobalEvent::ServerListUpdated);
-                cx.notify();
-            })
-        })
-        .detach();
+        toml::to_string(&clone).unwrap_or_default()
     }
 }
 
-/// Width the content pane actually gets: the viewport minus the sidebar *as it
-/// currently is*. Table views size their columns from this, and reading it as
-/// the expanded [`SIDEBAR_WIDTH`] left them ~128px short whenever the sidebar was
-/// collapsed to its icon rail.
-///
-/// Note this is sampled when a view builds its columns; collapsing the sidebar
-/// while such a view is already open won't re-lay it out until the view is
-/// rebuilt (it is dropped on route change).
-pub fn content_area_width(window: &Window, cx: &App) -> Pixels {
-    let sidebar = cx.global::<ZedisGlobalStore>().read(cx).sidebar_px();
-    window.viewport_size().width - sidebar
-}
-
-/// Debounce window for high-frequency config saves (panel drags, sliders).
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+static SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Write the current app state to disk while the app is shutting down.
-///
-/// Every `update_app_state_and_save*` helper persists asynchronously — the
-/// debounced ones only after [`SAVE_DEBOUNCE`] of quiet — and `cx.quit()` waits
-/// for none of it. Resizing the key tree, switching a tab or toggling a
-/// preference and immediately quitting therefore lost the change. gpui blocks
-/// shutdown on the future returned here (up to its own shutdown timeout), so
-/// the write runs inline instead of on the background executor.
-///
-/// One registration covers every way out — the Quit action, ⌘Q, the last window
-/// closing, and the quit that hands over to an installer — so no exit path has
-/// to remember to flush. Register it once, after the store is installed as a
-/// global.
 pub fn flush_app_state_on_quit(cx: &App) {
     cx.on_app_quit(|cx| {
-        // `try_global`: the recovery window that runs when the local database
-        // can't be opened never installs the store, and quitting from there
-        // must not panic.
-        let state = cx.try_global::<ZedisGlobalStore>().map(|store| store.read(cx).clone());
+        let state = cx.try_global::<GlobalStore>().map(|store| store.read(cx).clone());
         async move {
             let Some(state) = state else {
                 return;
@@ -1785,39 +545,20 @@ pub fn flush_app_state_on_quit(cx: &App) {
     .detach();
 }
 
-/// Generation counter behind [`update_app_state_and_save_debounced`]: each
-/// debounced call bumps it, sleeps, and only the call still holding the
-/// latest generation performs the write — coalescing a drag's event stream
-/// into one disk write regardless of which view the events came from.
-static SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
-
-/// Shared core for the `update_app_state_and_save*` helpers.
-///
-/// 1. Apply the mutation to the global app state (always immediate).
-/// 2. If `debounce`, wait out [`SAVE_DEBOUNCE`] and yield to a newer call.
-/// 3. Snapshot the state *after* the wait (so the write carries every
-///    mutation applied during the quiet window) and persist it to disk.
-/// 4. If `refresh`, refresh all windows to apply visual changes.
 fn apply_and_save<F>(cx: &App, action_name: &'static str, refresh: bool, debounce: bool, mutation: F)
 where
-    F: FnOnce(&mut ZedisAppState, &App) + Send + 'static + Clone,
+    F: FnOnce(&mut AppState, &App) + Send + 'static + Clone,
 {
-    let store = cx.global::<ZedisGlobalStore>().clone();
-
+    let store = cx.global::<GlobalStore>().clone();
     cx.spawn(async move |cx| {
         store.update(cx, |state, cx| mutation(state, cx));
-
         if debounce {
             let generation = SAVE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
             if SAVE_GENERATION.load(Ordering::Acquire) != generation {
-                // Superseded by a newer debounced save; that call will
-                // persist a state snapshot that already includes this
-                // mutation.
                 return;
             }
         }
-
         let state = store.update(cx, |state, _| state.clone());
         cx.background_executor()
             .spawn(async move {
@@ -1828,7 +569,6 @@ where
                 }
             })
             .await;
-
         if refresh {
             cx.update(|cx| cx.refresh_windows());
         }
@@ -1836,423 +576,37 @@ where
     .detach();
 }
 
-/// Update app state, persist to disk, and refresh all windows.
-///
-/// Use for changes with app-wide visual effect (theme, locale, layout
-/// preferences read by other windows).
-#[inline]
 pub fn update_app_state_and_save<F>(cx: &App, action_name: &'static str, mutation: F)
 where
-    F: FnOnce(&mut ZedisAppState, &App) + Send + 'static + Clone,
+    F: FnOnce(&mut AppState, &App) + Send + 'static + Clone,
 {
     apply_and_save(cx, action_name, true, false, mutation);
 }
 
-/// Update app state and persist to disk *without* refreshing windows.
-///
-/// Use for bookkeeping state with no visual output (open tabs, update-check
-/// timestamps, AI credentials) — any visible side effect at those call sites
-/// already goes through its own store update + notify.
-#[inline]
 pub fn update_app_state_and_save_quiet<F>(cx: &App, action_name: &'static str, mutation: F)
 where
-    F: FnOnce(&mut ZedisAppState, &App) + Send + 'static + Clone,
+    F: FnOnce(&mut AppState, &App) + Send + 'static + Clone,
 {
     apply_and_save(cx, action_name, false, false, mutation);
 }
 
-/// Update app state immediately, but debounce the disk write (and the final
-/// window refresh) behind a [`SAVE_DEBOUNCE`] quiet window.
-///
-/// Use on high-frequency event streams — slider changes and the like — where
-/// writing the whole TOML per event is pure churn but the settled value must
-/// still repaint every window (e.g. the app font size). The in-memory state
-/// updates per event, so live UI reads stay current; only persistence and the
-/// app-wide repaint wait for the stream to settle. A quit inside the quiet
-/// window can lose the last write (same trade-off as the window-bounds save
-/// in `main.rs`).
-#[inline]
 pub fn update_app_state_and_save_debounced<F>(cx: &App, action_name: &'static str, mutation: F)
 where
-    F: FnOnce(&mut ZedisAppState, &App) + Send + 'static + Clone,
+    F: FnOnce(&mut AppState, &App) + Send + 'static + Clone,
 {
     apply_and_save(cx, action_name, true, true, mutation);
 }
 
-/// [`update_app_state_and_save_debounced`] without the settled-time window
-/// refresh — for high-frequency streams whose visual effect is already
-/// local to the emitting view (panel-resize drags: the view tracks the
-/// width in its own field and repaints itself per event).
-#[inline]
-pub fn update_app_state_and_save_quiet_debounced<F>(cx: &App, action_name: &'static str, mutation: F)
-where
-    F: FnOnce(&mut ZedisAppState, &App) + Send + 'static + Clone,
-{
-    apply_and_save(cx, action_name, false, true, mutation);
-}
-
 pub fn dialog_button_props(cx: &App) -> DialogButtonProps {
     DialogButtonProps::default()
-        .cancel_text(i18n_common(cx, "cancel"))
-        .ok_text(i18n_common(cx, "delete"))
+        .cancel_text(super::i18n_common(cx, "cancel"))
+        .ok_text(super::i18n_common(cx, "delete"))
 }
 
-/// Escalate a destructive-action confirm-dialog body for production servers.
-///
-/// The app's safety convention is that destructive Redis ops escalate their
-/// *wording* on a high-risk (PROD-tagged) connection. `dialog_button_props`
-/// only sets button labels, so call-sites that build their own
-/// `ZedisDialog::new_alert(...)` must run the body through this to actually
-/// get the escalation. It mirrors the `high_risk_warning` suffix that
-/// `confirm_dangerous_command` appends for `ConfirmStrictness::TypeName`, but
-/// works for the many UI actions (key/server delete, XGROUP DESTROY, cluster
-/// ops, ACL/FUNCTION delete, ...) that don't map to a CLI `DangerKind`.
-/// Returns the body unchanged for non-high-risk servers.
-pub fn escalate_dangerous_body(cx: &App, server_id: &str, body: impl Into<SharedString>) -> SharedString {
-    let body = body.into();
-    let high_risk = get_server(server_id).map(|s| s.is_high_risk_tag()).unwrap_or(false);
-    if !high_risk {
-        return body;
-    }
-    let locale = cx.global::<ZedisGlobalStore>().read(cx).locale().to_string();
-    let warning = rust_i18n::t!("danger.high_risk_warning", locale = &locale).to_string();
-    format!("{body}\n\n{warning}").into()
-}
-
-/// Navigation / connection-selection logic tests on the headless gpui test
-/// platform. These lock in the event contracts that broke in past releases:
-/// the tray "Quick Connect does nothing" and "New Connection dialog doesn't
-/// open" regressions were both silent logic bugs in this file.
-/// Real `zedis.toml` files from earlier releases. Every one must keep
-/// parsing — an upgrade that resets a user's preferences is a regression —
-/// and values that still exist must survive. Add a fixture whenever a
-/// release changes the persisted shape.
-#[cfg(test)]
-mod upgrade_fixtures {
-    use super::*;
-    use gpui::px;
-
-    const V0_4_0: &str = include_str!("fixtures/zedis-v0.4.0.toml");
-    const V0_6_0: &str = include_str!("fixtures/zedis-v0.6.0.toml");
-
-    fn load(fixture: &str) -> ZedisAppState {
-        toml::from_str(fixture).expect("an old zedis.toml must keep parsing")
-    }
-
-    #[test]
-    fn an_empty_file_parses_to_defaults() {
-        // The contract behind `#[serde(default)]`: no field may ever be
-        // required, or a `.bak` from before that field was added breaks.
-        let state: ZedisAppState = toml::from_str("").expect("empty file");
-        assert_eq!(state.locale, None);
-        assert_eq!(state.key_tree_width, Pixels::ZERO);
-    }
-
-    #[test]
-    fn value_search_guardrails_clamp_and_reset() {
-        let mut state: ZedisAppState = toml::from_str("").expect("empty file");
-        assert_eq!(state.value_search_scan_cap(), 10_000);
-        assert_eq!(state.value_search_time_budget_secs(), 10);
-        assert_eq!(state.value_search_max_matches(), 500);
-
-        // A typo can't turn a search into an unbounded walk — clamped.
-        state.set_value_search_scan_cap(5);
-        assert_eq!(state.value_search_scan_cap(), 1_000);
-        state.set_value_search_time_budget_secs(9_999);
-        assert_eq!(state.value_search_time_budget_secs(), 300);
-        state.set_value_search_max_matches(2_000);
-        assert_eq!(state.value_search_max_matches(), 2_000);
-
-        // 0 (cleared input) resets to the defaults.
-        state.set_value_search_scan_cap(0);
-        state.set_value_search_time_budget_secs(0);
-        state.set_value_search_max_matches(0);
-        assert_eq!(state.value_search_scan_cap(), 10_000);
-        assert_eq!(state.value_search_time_budget_secs(), 10);
-        assert_eq!(state.value_search_max_matches(), 500);
-    }
-
-    #[test]
-    fn v0_4_0_preferences_survive() {
-        let state = load(V0_4_0);
-        // 0.4 stored the `Route` enum; its unit variant is the token the
-        // current loader resolves through `ServerView::from_name`.
-        assert_eq!(state.route_token, "Editor");
-        assert_eq!(state.locale.as_deref(), Some("zh"));
-        assert_eq!(state.theme.as_deref(), Some("dark"));
-        assert_eq!(state.font_size, Some(FontSize::Large));
-        assert_eq!(state.key_tree_width, px(280.));
-        assert_eq!(state.max_key_tree_depth, Some(6));
-        assert_eq!(state.key_scan_count, Some(500));
-        assert_eq!(state.selected_server, Some(("srv-1".to_string(), 2)));
-        assert_eq!(state.redis_connection_timeout, Some(Duration::from_secs(10)));
-        assert_eq!(state.tray_enabled, Some(true));
-        assert_eq!(
-            state.collapsed_server_groups.as_deref(),
-            Some(&["Team A".to_string()][..])
-        );
-        let bounds = state.bounds.expect("bounds");
-        assert_eq!(bounds.size.width, px(1200.));
-        // Fields 0.4 didn't have fall back cleanly.
-        assert!(state.window_placements.is_empty());
-        assert!(state.last_db.is_empty());
-        assert_eq!(state.multi_search_scope, MultiSearchScope::default());
-    }
-
-    #[test]
-    fn v0_6_0_preferences_survive() {
-        let state = load(V0_6_0);
-        assert_eq!(state.route_token, "metrics");
-        assert_eq!(state.theme_name.as_deref(), Some("Catppuccin Latte"));
-        assert_eq!(state.font_rem_px, Some(15.0));
-        assert_eq!(state.ui_font_family.as_deref(), Some("Inter"));
-        assert_eq!(state.kv_edit_panel_width, Some(px(420.)));
-        assert_eq!(
-            state.open_tabs,
-            vec![("srv-2".to_string(), 0), ("srv-3".to_string(), 1)]
-        );
-        assert_eq!(state.last_db.get("srv-3"), Some(&1));
-        assert_eq!(state.window_placements.len(), 1);
-        assert_eq!(state.soft_delete, Some(true));
-        assert_eq!(state.sidebar_collapsed, Some(false));
-    }
-
-    #[test]
-    fn old_files_round_trip_through_the_current_writer() {
-        // What the current version writes back must itself load — the
-        // `.bak` a later recovery restores is exactly this output.
-        for fixture in [V0_4_0, V0_6_0] {
-            let state = load(fixture);
-            let written = toml::to_string(&state).expect("serialize");
-            let again: ZedisAppState = toml::from_str(&written).expect("re-parse");
-            assert_eq!(again.locale, state.locale);
-            assert_eq!(again.selected_server, state.selected_server);
-            assert_eq!(again.key_tree_width, state.key_tree_width);
-            assert_eq!(again.route_token, state.route_token);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::helpers::override_config_dir;
-    use gpui::{Subscription, TestAppContext};
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    /// Redirect state persistence into a temp dir before any test triggers
-    /// `persist_nav` — a stray background save must never touch the real
-    /// `zedis.toml`.
-    fn isolate_config() {
-        let dir = std::env::temp_dir().join(format!("zedis-test-config-{}", std::process::id()));
-        override_config_dir(dir);
-    }
-
-    /// Recorded `(server_id, db)` of every `ServerSelected` emission.
-    type SelectedRecorder = Rc<RefCell<Vec<(String, usize)>>>;
-
-    /// A fresh state entity plus a recorder of every `ServerSelected` it
-    /// emits (the event that actually loads a connection).
-    fn state_with_recorder(cx: &mut TestAppContext) -> (Entity<ZedisAppState>, SelectedRecorder, Subscription) {
-        isolate_config();
-        let state = cx.new(|_| ZedisAppState::default());
-        let events: SelectedRecorder = Rc::default();
-        let recorder = events.clone();
-        let subscription = cx.update(|cx| {
-            cx.subscribe(&state, move |_state, event: &GlobalEvent, _cx| {
-                if let GlobalEvent::ServerSelected(id, db) = event {
-                    recorder.borrow_mut().push((id.to_string(), *db));
-                }
-            })
-        });
-        (state, events, subscription)
-    }
-
-    #[gpui::test]
-    fn connect_server_always_announces(cx: &mut TestAppContext) {
-        let (state, events, _sub) = state_with_recorder(cx);
-        // Restart scenario: the persisted snapshot already points at the
-        // target server while nothing is loaded in this session. Relying on
-        // apply_route's dedupe here was the "tray click does nothing" bug.
-        state.update(cx, |state, _| state.selected_server = Some(("srv-1".to_string(), 2)));
-        state.update(cx, |state, cx| state.connect_server("srv-1".to_string(), 2, cx));
-        assert_eq!(events.borrow().as_slice(), &[("srv-1".to_string(), 2)]);
-        state.read_with(cx, |state, _| {
-            assert_eq!(state.selected_server(), Some(&("srv-1".to_string(), 2)));
-            assert_eq!(state.open_db_for("srv-1"), 2);
-            assert!(matches!(
-                state.route(),
-                Route::Server {
-                    db: 2,
-                    view: ServerView::Editor,
-                    ..
-                }
-            ));
-        });
-        // Reconnecting the already-active server is still a (re)connect.
-        state.update(cx, |state, cx| state.connect_server("srv-1".to_string(), 2, cx));
-        assert_eq!(events.borrow().len(), 2);
-    }
-
-    #[gpui::test]
-    fn navigation_does_not_reannounce_same_connection(cx: &mut TestAppContext) {
-        let (state, events, _sub) = state_with_recorder(cx);
-        state.update(cx, |state, cx| state.connect_server("srv-1".to_string(), 0, cx));
-        assert_eq!(events.borrow().len(), 1);
-        // App-level detour and back: same connection → no reload.
-        state.update(cx, |state, cx| state.go_to(Route::Settings, cx));
-        state.update(cx, |state, cx| {
-            state.go_to(
-                Route::Server {
-                    id: "srv-1".into(),
-                    db: 0,
-                    view: ServerView::Metrics,
-                },
-                cx,
-            );
-        });
-        assert_eq!(events.borrow().len(), 1);
-        // Switching databases is a different connection → announce.
-        state.update(cx, |state, cx| {
-            state.go_to(
-                Route::Server {
-                    id: "srv-1".into(),
-                    db: 3,
-                    view: ServerView::Metrics,
-                },
-                cx,
-            );
-        });
-        assert_eq!(
-            events.borrow().as_slice(),
-            &[("srv-1".to_string(), 0), ("srv-1".to_string(), 3)]
-        );
-    }
-
-    // Tray flow — `go_with_query` (like the tray itself) is compiled out
-    // on Linux, so this regression test only exists where the tray does.
-    #[cfg(not(target_os = "linux"))]
-    #[gpui::test]
-    fn new_connection_query_survives_clear(cx: &mut TestAppContext) {
-        let (state, events, _sub) = state_with_recorder(cx);
-        state.update(cx, |state, cx| state.connect_server("srv-1".to_string(), 0, cx));
-        // Tray "New Connection": clear first, then route Home with new=true.
-        // The reverse order lets clear_selected_server's Home routing wipe
-        // the query (the "dialog doesn't open" bug).
-        state.update(cx, |state, cx| {
-            state.clear_selected_server(cx);
-            let mut query = HashMap::new();
-            query.insert("new".to_string(), "true".to_string());
-            state.go_with_query(Route::Home, query, cx);
-        });
-        state.read_with(cx, |state, _| {
-            assert_eq!(state.route(), Route::Home);
-            assert_eq!(state.selected_server(), None);
-            assert_eq!(
-                state.get_route_query().and_then(|q| q.get("new")).map(String::as_str),
-                Some("true")
-            );
-        });
-        // The clear announced the empty selection (sidebar/status bar reset).
-        assert_eq!(events.borrow().last(), Some(&(String::new(), 0)));
-    }
-
-    #[gpui::test]
-    fn activate_always_announces_server_route(cx: &mut TestAppContext) {
-        let (state, events, _sub) = state_with_recorder(cx);
-        // Startup restore: the snapshot matches the restored route, but the
-        // views subscribed after try_new — activate must still announce so
-        // the connection actually loads.
-        state.update(cx, |state, _| state.selected_server = Some(("srv-1".to_string(), 1)));
-        state.update(cx, |state, cx| {
-            state.activate(
-                Route::Server {
-                    id: "srv-1".into(),
-                    db: 1,
-                    view: ServerView::Editor,
-                },
-                cx,
-            );
-        });
-        assert_eq!(events.borrow().as_slice(), &[("srv-1".to_string(), 1)]);
-    }
-
-    /// The state is written asynchronously, so quitting used to be a race the
-    /// user could lose. These drive the real shutdown path: `TestAppContext::quit`
-    /// runs gpui's quit observers and blocks on their futures, same as a ⌘Q.
-    mod quit_flush {
-        use super::*;
-
-        fn config_file() -> std::path::PathBuf {
-            get_or_create_server_config().expect("config path")
-        }
-
-        fn file_text() -> String {
-            std::fs::read_to_string(config_file()).unwrap_or_default()
-        }
-
-        #[gpui::test]
-        fn quitting_writes_a_save_that_is_still_waiting_out_its_debounce(cx: &mut TestAppContext) {
-            isolate_config();
-            let probe = "quit-flush-probe";
-            let state = cx.new(|_| ZedisAppState::default());
-
-            cx.update(|cx| {
-                cx.set_global(ZedisGlobalStore::new(state.clone()));
-                flush_app_state_on_quit(cx);
-                update_app_state_and_save_debounced(cx, "test", move |state, _| {
-                    state.set_theme_name(Some(probe.to_string()));
-                });
-            });
-
-            // The mutation lands immediately; the write is parked on the
-            // debounce timer, which the test clock never advances.
-            cx.run_until_parked();
-            assert_eq!(
-                state.read_with(cx, |s, _| s.theme_name()),
-                Some(probe.to_string()),
-                "the mutation itself is not debounced"
-            );
-            assert!(!file_text().contains(probe), "the write really is still pending");
-
-            cx.quit();
-            assert!(
-                file_text().contains(probe),
-                "quitting must flush the pending state, got: {}",
-                file_text()
-            );
-        }
-
-        #[gpui::test]
-        fn quitting_without_a_store_is_not_a_panic(cx: &mut TestAppContext) {
-            // The database-recovery window never installs the global store, and
-            // quitting from there must still work.
-            isolate_config();
-            cx.update(|cx| flush_app_state_on_quit(cx));
-            cx.quit();
-        }
-    }
-}
-
-#[cfg(test)]
-mod system_locale_tests {
-    use super::{SUPPORTED_LOCALES, language_from_system_locale};
-
-    #[test]
-    fn os_language_tags_map_to_bundled_locales() {
-        assert_eq!(language_from_system_locale(Some("zh-Hans-CN")), "zh");
-        assert_eq!(language_from_system_locale(Some("zh_TW")), "zh");
-        assert_eq!(language_from_system_locale(Some("en-US")), "en");
-        assert_eq!(language_from_system_locale(Some("pt-BR")), "pt");
-        assert_eq!(language_from_system_locale(Some("de_DE.UTF-8")), "de");
-        assert_eq!(language_from_system_locale(Some("JA")), "ja");
-        // A language without a bundle, an empty tag, and no tag at all.
-        assert_eq!(language_from_system_locale(Some("ko-KR")), "en");
-        assert_eq!(language_from_system_locale(Some("")), "en");
-        assert_eq!(language_from_system_locale(None), "en");
-        for bundled in SUPPORTED_LOCALES {
-            assert_eq!(language_from_system_locale(Some(bundled)), bundled);
-        }
-    }
+pub fn notify(cx: &mut App, action: NotificationAction) {
+    let store = cx.global::<GlobalStore>().state();
+    store.update(cx, |state, cx| {
+        cx.emit(GlobalEvent::Notification(action));
+        let _ = state;
+    });
 }

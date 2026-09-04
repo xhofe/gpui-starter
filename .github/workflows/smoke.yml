@@ -7,11 +7,11 @@ name: "Smoke"
 # every push to main, with a job per concern:
 #
 # - macos: the real first-frame gate (hard). macOS is the primary user
-#   platform and its runners have a WindowServer, so ZEDIS_SMOKE_TEST is
+#   platform and its runners have a WindowServer, so GPUI_STARTER_SMOKE_TEST is
 #   a reliable signal there — the same check publish.yml hard-gates.
 # - linux: a cross-platform *build* gate (x11/wayland features and
 #   cfg(target_os) branches only compile here) plus a hard *window* gate
-#   (`ZEDIS_SMOKE_GATE=window`: the main window is created and the process
+#   (`GPUI_STARTER_SMOKE_GATE=window`: the main window is created and the process
 #   survives its first seconds — catches missing libraries, Vulkan /
 #   window-creation failures and startup panics). The first-frame check
 #   stays best-effort because the frame-present signal never fires under
@@ -29,7 +29,6 @@ on:
     paths:
       - "src/**"
       - "crates/**"
-      - "zedis-cmd-builder/**"
       - "locales/**"
       - "assets/**"
       - "Cargo.toml"
@@ -72,9 +71,9 @@ jobs:
         # does within 30s — the "window never appears" regression class.
         timeout-minutes: 5
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config
-        run: ./target/release/zedis
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config
+        run: ./target/release/gpui-starter
 
   linux:
     runs-on: ubuntu-22.04
@@ -107,10 +106,10 @@ jobs:
         # a startup panic — and it is reliable headless.
         timeout-minutes: 5
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_SMOKE_GATE: window
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config
-        run: xvfb-run -a ./target/release/zedis
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_SMOKE_GATE: window
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config
+        run: xvfb-run -a ./target/release/gpui-starter
       - name: smoke test (first frame must paint)
         # Best-effort: the first-frame signal has never fired under Xvfb +
         # llvmpipe (see the matching note in publish.yml) — this step keeps
@@ -119,9 +118,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config-frame
-        run: xvfb-run -a ./target/release/zedis
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config-frame
+        run: xvfb-run -a ./target/release/gpui-starter
 
   windows:
     runs-on: windows-latest
@@ -149,10 +148,10 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         env:
-          ZEDIS_SMOKE_TEST: "1"
-          ZEDIS_CONFIG_DIR: ${{ runner.temp }}/zedis-smoke-config
+          GPUI_STARTER_SMOKE_TEST: "1"
+          GPUI_STARTER_CONFIG_DIR: ${{ runner.temp }}/gpui-starter-smoke-config
         run: |
-          $p = Start-Process -FilePath .\target\x86_64-pc-windows-msvc\release\zedis.exe -Wait -PassThru
+          $p = Start-Process -FilePath .\target\x86_64-pc-windows-msvc\release\gpui-starter.exe -Wait -PassThru
           if ($p.ExitCode -ne 0) {
             Write-Error "smoke test failed: exit code $($p.ExitCode)"
             exit 1

@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,60 +14,39 @@
 
 use snafu::Snafu;
 
-pub use zedis_connection::error::ConnectionErrorKind;
-
-type ConnectionError = zedis_connection::error::Error;
-
-/// App-level error. Connection-layer failures pass through transparently;
-/// the extra variants exist only for errors the app itself produces (proto
-/// decoding, the local redb database) so `zedis-connection` doesn't have to
-/// depend on those crates just to name them.
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(transparent)]
-    Connection { source: ConnectionError },
-    #[snafu(transparent)]
-    Db { source: zedis_db::error::Error },
+    Db { source: gpui_starter_db::error::Error },
     #[snafu(display("Invalid: {message}"))]
     Invalid { message: String },
+    #[snafu(display("IO error: {source}"))]
+    Io { source: std::io::Error },
+    #[snafu(display("TOML error: {source}"))]
+    TomlDe { source: toml::de::Error },
+    #[snafu(display("TOML error: {source}"))]
+    TomlSer { source: toml::ser::Error },
+    #[snafu(display("JSON error: {source}"))]
+    Json { source: serde_json::Error },
 }
 
-impl Error {
-    /// Delegates to the connection layer's classifier; app-domain errors are
-    /// never link failures, so they report `Unknown`.
-    pub fn connection_kind(&self) -> ConnectionErrorKind {
-        match self {
-            Error::Connection { source } => source.connection_kind(),
-            _ => ConnectionErrorKind::Unknown,
-        }
-    }
-
-    /// See [`zedis_connection::error::Error::connection_kind_tls_aware`].
-    pub fn connection_kind_tls_aware(&self, tls_enabled: bool) -> ConnectionErrorKind {
-        match self {
-            Error::Connection { source } => source.connection_kind_tls_aware(tls_enabled),
-            _ => ConnectionErrorKind::Unknown,
-        }
+impl From<std::io::Error> for Error {
+    fn from(source: std::io::Error) -> Self {
+        Error::Io { source }
     }
 }
-
-// External errors the app converts with `?` — routed through the connection
-// error (which owns their From impls) so classification keeps working.
-macro_rules! via_connection {
-    ($($ty:ty),+ $(,)?) => {$(
-        impl From<$ty> for Error {
-            fn from(source: $ty) -> Self {
-                Error::Connection {
-                    source: ConnectionError::from(source),
-                }
-            }
-        }
-    )+};
+impl From<toml::de::Error> for Error {
+    fn from(source: toml::de::Error) -> Self {
+        Error::TomlDe { source }
+    }
 }
-via_connection!(
-    redis::RedisError,
-    std::io::Error,
-    serde_json::Error,
-    toml::de::Error,
-    toml::ser::Error,
-);
+impl From<toml::ser::Error> for Error {
+    fn from(source: toml::ser::Error) -> Self {
+        Error::TomlSer { source }
+    }
+}
+impl From<serde_json::Error> for Error {
+    fn from(source: serde_json::Error) -> Self {
+        Error::Json { source }
+    }
+}

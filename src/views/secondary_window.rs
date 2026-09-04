@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,10 +20,6 @@ use gpui::{
 use gpui_kit::component::Root;
 use std::{any::TypeId, collections::HashMap};
 
-/// The `DisplayId` of the monitor the main (active) window is currently on, or
-/// `None` if there's no active window. Pass it to `Bounds::centered` so a
-/// secondary window (About / Settings) opens on the same monitor as the app
-/// instead of always centering on the primary display.
 pub fn active_window_display(cx: &mut App) -> Option<DisplayId> {
     let handle = cx.active_window()?;
     handle
@@ -32,9 +28,6 @@ pub fn active_window_display(cx: &mut App) -> Option<DisplayId> {
         .flatten()
 }
 
-/// Global registry that tracks open secondary windows by their content type.
-/// Allows [`open_secondary_window`] to reuse an existing window instead of
-/// opening a duplicate.
 struct SecondaryWindowRegistry(HashMap<TypeId, AnyWindowHandle>);
 
 impl Global for SecondaryWindowRegistry {}
@@ -48,26 +41,13 @@ impl SecondaryWindowRegistry {
     }
 }
 
-/// Wrapper view that takes focus on creation and closes the window on ESC.
-///
-/// Used as the content layer inside [`Root`] for all secondary windows
-/// (settings, about, etc.) so that ESC-to-close behaviour is centralised
-/// in one place rather than repeated per-window.
 struct SecondaryWindow<V: Render + 'static> {
     focus_handle: FocusHandle,
     content: Entity<V>,
 }
 
-impl<V: Render + 'static> SecondaryWindow<V> {
-    fn new(content: Entity<V>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
-        Self { focus_handle, content }
-    }
-}
-
 impl<V: Render + 'static> Focusable for SecondaryWindow<V> {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
@@ -77,49 +57,36 @@ impl<V: Render + 'static> Render for SecondaryWindow<V> {
         div()
             .size_full()
             .track_focus(&self.focus_handle)
-            .capture_key_down(cx.listener(|_this, event: &KeyDownEvent, window, _cx| {
+            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     window.remove_window();
+                    cx.stop_propagation();
                 }
             }))
             .child(self.content.clone())
     }
 }
 
-/// Opens a secondary (non-main) window with ESC-to-close support.
-///
-/// If a window for the same content type `V` is already open it will be
-/// activated instead of creating a duplicate.  The `build` closure receives
-/// `(window, cx)` and should return the content entity.  The window is
-/// automatically wrapped with [`Root`] (required by gpui_component widgets)
-/// and [`SecondaryWindow`] (focus + ESC handling).
-pub fn open_secondary_window<V, F>(options: WindowOptions, cx: &mut App, build: F)
-where
-    V: Render + 'static,
-    F: FnOnce(&mut Window, &mut App) -> Entity<V> + 'static,
-{
+pub fn open_secondary_window<V: Render + 'static>(
+    options: WindowOptions,
+    cx: &mut App,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+) {
     let type_id = TypeId::of::<V>();
-
-    // Check whether a window for this type already exists and is still open.
-    if let Some(handle) = SecondaryWindowRegistry::get(cx).0.get(&type_id).copied() {
-        let still_open = handle.update(cx, |_, window, _| window.activate_window()).is_ok();
-        if still_open {
-            return;
-        }
-        // Window was closed — fall through to create a new one.
-        SecondaryWindowRegistry::get(cx).0.remove(&type_id);
+    if let Some(existing) = SecondaryWindowRegistry::get(cx).0.get(&type_id).copied()
+        && existing.update(cx, |_, window, _| window.activate_window()).is_ok()
+    {
+        return;
     }
-
-    // Stamp Wayland app_id + default title/icon so secondary windows (About,
-    // Settings, …) group with the main window and don't show the generic
-    // "Wayland (W)" icon on KDE (issue #106). Caller-supplied title wins.
-    let options = with_app_identity(options);
-
-    if let Ok(handle) = cx.open_window(options, move |window, cx| {
+    let opened = cx.open_window(with_app_identity(options), |window, cx| {
         let content = build(window, cx);
-        let wrapper = cx.new(|cx| SecondaryWindow::new(content, window, cx));
-        cx.new(|cx| Root::new(wrapper, window, cx))
-    }) {
+        let view = cx.new(|cx| SecondaryWindow {
+            focus_handle: cx.focus_handle(),
+            content,
+        });
+        cx.new(|cx| Root::new(view, window, cx))
+    });
+    if let Ok(handle) = opened {
         SecondaryWindowRegistry::get(cx).0.insert(type_id, handle.into());
     }
 }

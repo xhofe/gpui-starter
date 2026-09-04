@@ -21,15 +21,7 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # of what gpui-kit pins.
 unmaintained = "workspace"
 yanked = "warn"
-ignore = [
-    # rsa "Marvin Attack" timing side channel — no fixed version exists.
-    # Reached through russh / ssh-key for RSA SSH keys (SSH tunnels); the
-    # only way to drop it is russh's `rsa` feature, i.e. no RSA keys. The
-    # attack needs a local attacker timing RSA decryption during the SSH
-    # handshake, outside this app's threat model. Risk accepted until
-    # russh moves off the rsa release candidate.
-    { id = "RUSTSEC-2023-0071", reason = "no fix; local timing attack on the SSH handshake is outside the threat model" },
-]
+ignore = []
 
 [licenses]
 version = 2

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=GPUI Starter
+Exec=gpui-starter
+Icon=gpui-starter
+Type=Application
+Categories=Development;Utility;
+Comment=A native desktop app starter written in Rust and GPUI
+Terminal=false
+StartupWMClass=gpui-starter
+StartupNotify=true

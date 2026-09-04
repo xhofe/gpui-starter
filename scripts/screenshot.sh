@@ -1,45 +1,35 @@
 #!/bin/bash
-# Launch Zedis on a given route, capture its window, and exit — for
+# Launch the app on a given route, capture its window, and exit — for
 # before/after visual comparison while iterating on UI changes (macOS only).
 #
 # Usage:
 #   scripts/screenshot.sh <route> [output.png] [wait_seconds] [--release]
-#                         [--server=<id|name>] [--db=<n>]
 #
-#   <route>        A `Route::from_name` token: home, settings, protos, scripts,
-#                  editor, metrics, slowlog, memoryanalysis, clients, monitor,
-#                  config, acl, search, functions, luascripts, persistence,
-#                  keyspacenotifications, topology, serverload, valuesearch
+#   <route>        A `Route::from_name` token: home, todos, settings
 #   [output.png]   Defaults to screenshots/<route>.png
-#   [wait_seconds] Time to wait for the first frame + data (default 5)
+#   [wait_seconds] Time to wait for the first frame (default 5)
 #   --release      Build/run the release binary instead of debug
 #
 # Requirements:
 #   - Screen Recording permission for your terminal (System Settings →
 #     Privacy & Security → Screen Recording), or the capture comes out empty.
-#   - Server-scoped routes render against the last remembered connection
-#     (zedis.toml `selected_server`) — connect once manually beforehand.
-#   - No other Zedis instance running (single-instance DB lock).
+#   - No other instance running (single-instance DB lock).
 set -euo pipefail
 
 ROUTE="${1:?usage: scripts/screenshot.sh <route> [output.png] [wait_seconds] [--release]}"
 OUT="${2:-screenshots/${ROUTE}.png}"
 WAIT="${3:-5}"
 PROFILE="debug"
-EXTRA_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --release) PROFILE="release" ;;
-    # Deep-link passthrough (single-token `--flag=value` form only, so the
-    # positional args above stay unambiguous).
-    --server=* | --db=*) EXTRA_ARGS+=("$arg") ;;
   esac
 done
 
 cd "$(dirname "$0")/.."
 
-if pgrep -xq zedis; then
-  echo "error: a Zedis instance is already running (single-instance DB lock); quit it first" >&2
+if pgrep -xq gpui-starter; then
+  echo "error: an instance is already running (single-instance DB lock); quit it first" >&2
   exit 1
 fi
 
@@ -50,11 +40,9 @@ else
   cargo build --quiet
 fi
 
-# Resolve the target dir from cargo itself so CARGO_TARGET_DIR / .cargo config
-# redirections (e.g. ~/cargo-target) work — never assume ./target.
 TARGET_DIR="$(cargo metadata --format-version=1 --no-deps 2>/dev/null \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
-BIN="${TARGET_DIR:-target}/$PROFILE/zedis"
+BIN="${TARGET_DIR:-target}/$PROFILE/gpui-starter"
 if [ ! -x "$BIN" ]; then
   echo "error: built binary not found at $BIN" >&2
   exit 1
@@ -62,9 +50,7 @@ fi
 
 mkdir -p "$(dirname "$OUT")"
 
-# `${arr[@]+...}` guard: empty-array expansion under `set -u` errors on the
-# macOS system bash (3.2).
-"$BIN" --route "$ROUTE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
+"$BIN" &
 APP_PID=$!
 cleanup() { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; }
 trap cleanup EXIT
@@ -72,9 +58,7 @@ trap cleanup EXIT
 echo "waiting ${WAIT}s for the ${ROUTE} view to render…"
 sleep "$WAIT"
 
-# Resolve the window ID of the largest normal-layer window owned by the zedis
-# process, via CGWindowList (no external tools; swift ships with Xcode CLT).
-WINDOW_SWIFT="$(mktemp -t zedis-window).swift"
+WINDOW_SWIFT="$(mktemp -t gpui-starter-window).swift"
 cat > "$WINDOW_SWIFT" <<'EOF'
 import CoreGraphics
 import Foundation
@@ -82,7 +66,7 @@ guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDeskto
     as? [[String: Any]] else { exit(1) }
 var best: (id: Int, area: Double)? = nil
 for w in list {
-    guard let owner = w["kCGWindowOwnerName"] as? String, owner.lowercased() == "zedis",
+    guard let owner = w["kCGWindowOwnerName"] as? String, owner.lowercased() == "gpui starter",
         let layer = w["kCGWindowLayer"] as? Int, layer == 0,
         let id = w["kCGWindowNumber"] as? Int,
         let bounds = w["kCGWindowBounds"] as? [String: Double] else { continue }
@@ -96,11 +80,10 @@ WINDOW_ID="$(swift "$WINDOW_SWIFT" 2>/dev/null || true)"
 rm -f "$WINDOW_SWIFT"
 
 if [ -z "$WINDOW_ID" ]; then
-  echo "error: no zedis window found — did the app fail to start, or is the wait too short?" >&2
+  echo "error: no window found — did the app fail to start, or is the wait too short?" >&2
   exit 1
 fi
 
-# -o: omit the window shadow (stable pixels for diffs); -x: no capture sound.
 screencapture -o -x -l "$WINDOW_ID" "$OUT"
 
 if [ ! -s "$OUT" ]; then

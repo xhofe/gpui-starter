@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.xhofe.gpui-starter</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+
+  <name>GPUI Starter</name>
+  <summary>Native desktop app starter built with Rust and GPUI</summary>
+
+  <developer id="io.github.xhofe">
+    <name>Andy Hsu</name>
+  </developer>
+
+  <description>
+    <p>
+      GPUI Starter is a native, GPU-accelerated desktop app template built in
+      Rust with GPUI, the rendering engine behind the Zed editor. Clone it, run
+      ./scripts/init.sh my-app, and start building.
+    </p>
+    <p>The shell includes Home, a redb-backed Todos demo, Settings (theme,
+      language, fonts, proxy, updates, tray), a command palette, workspace tabs,
+      and packaging CI for macOS, Windows and Linux.</p>
+  </description>
+
+  <launchable type="desktop-id">io.github.xhofe.gpui-starter.desktop</launchable>
+
+  <url type="homepage">https://github.com/xhofe/gpui-starter</url>
+  <url type="bugtracker">https://github.com/xhofe/gpui-starter/issues</url>
+  <url type="vcs-browser">https://github.com/xhofe/gpui-starter</url>
+
+  <categories>
+    <category>Development</category>
+  </categories>
+
+  <keywords>
+    <keyword>gpui</keyword>
+    <keyword>gui</keyword>
+    <keyword>rust</keyword>
+    <keyword>desktop</keyword>
+  </keywords>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-09-04">
+      <url>https://github.com/xhofe/gpui-starter/releases/tag/v0.1.0</url>
+    </release>
+  </releases>
+</component>

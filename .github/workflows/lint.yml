@@ -9,7 +9,7 @@ env:
   GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.98.0
-  APP_NAME: Zedis
+  APP_NAME: "GPUI Starter"
 
 jobs:
   # rust-toolchain.toml is what actually compiles the code (rustup gives
@@ -34,7 +34,7 @@ jobs:
           done
           exit $bad
 
-  # `rust-version` in Cargo.toml is the promise `cargo install zedis-gui`
+  # `rust-version` in Cargo.toml is the promise `cargo install gpui-starter`
   # users build against — but nothing else compiles with that toolchain,
   # so a code or dependency bump can silently break it (it did: the
   # vergen 10.x family raised the real floor to 1.96 while the manifest

@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ impl ZipWriter {
         Self::default()
     }
 
-    /// Adds one file. `name` uses `/` separators (`logs/zedis.log.2026-08-22`).
+    /// Adds one file. `name` uses `/` separators (`logs/gpui-starter.log.2026-08-22`).
     pub fn add(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data)?;
@@ -180,14 +180,14 @@ mod tests {
         let mut zip = ZipWriter::new();
         let big: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         zip.add("summary.txt", b"hello").expect("add");
-        zip.add("logs/zedis.log.2026-08-22", &big).expect("add");
+        zip.add("logs/gpui-starter.log.2026-08-22", &big).expect("add");
         zip.add("empty", b"").expect("add");
         let archive = zip.finish();
 
         let entries = read_entries(&archive);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], ("summary.txt".to_string(), b"hello".to_vec()));
-        assert_eq!(entries[1].0, "logs/zedis.log.2026-08-22");
+        assert_eq!(entries[1].0, "logs/gpui-starter.log.2026-08-22");
         assert_eq!(entries[1].1, big);
         assert_eq!(entries[2].1, Vec::<u8>::new());
         // Deflate actually compressed the repetitive payload.

@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,15 +13,12 @@
 // limitations under the License.
 
 //! Pre-window startup pieces: version constants, the database recovery
-//! window, CLI argument parsing and the smoke-test gates.
+//! window, and the smoke-test gates.
 
-use crate::connection::{RedisServer, get_servers};
-use crate::db::{DbOpenFailure, init_database, quarantine_database};
-use crate::states::{GlobalEvent, NotificationAction, Route, ServerView, ZedisAppState, ZedisGlobalStore};
-use crate::{init_caches, launch};
-use gpui::{App, SharedString, Window, div, prelude::*};
-// Only the custom-drawn title bar path uses this (Linux/FreeBSD keep
-// server-side decorations — see the cfg at the open_window call).
+use crate::helpers::get_or_create_config_dir;
+use crate::launch;
+use crate::states::AppState;
+use gpui::{SharedString, Window, div, prelude::*};
 use gpui_kit::component::{
     ActiveTheme, StyledExt,
     button::{Button, ButtonVariants},
@@ -29,41 +26,35 @@ use gpui_kit::component::{
     label::Label,
     v_flex,
 };
+use gpui_starter_db::{DbOpenFailure, init_database, quarantine_database};
 use rust_i18n::t;
-use tracing::{error, info, warn};
+use std::path::PathBuf;
+use tracing::{error, warn};
 
-pub(crate) const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const GIT_SHA: &str = env!("VERGEN_GIT_SHA");
-/// RFC 3339 build time (vergen), what a nightly is compared against.
 pub(crate) const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
-/// `ZEDIS_BUILD_CHANNEL` at build time: `nightly` for the rolling build
-/// publish.yml makes from main, else stable. A nightly build follows the
-/// pre-release channel by default, since /releases/latest would never
-/// name it a newer version.
-pub(crate) const BUILD_CHANNEL: &str = match option_env!("ZEDIS_BUILD_CHANNEL") {
+pub(crate) const BUILD_CHANNEL: &str = match option_env!("GPUI_STARTER_BUILD_CHANNEL") {
     Some(channel) => channel,
     None => "stable",
 };
+
 pub(crate) fn is_nightly_build() -> bool {
     BUILD_CHANNEL == "nightly"
 }
 
-/// Shown when the local database can't be opened. Three causes, three
-/// remedies: another instance holds the lock (quit it), the file was written by
-/// a newer Zedis (update, or rebuild), or the file is damaged (rebuild).
-/// "Back up & rebuild" moves the file aside as `zedis.redb.corrupt-<ts>` —
-/// nothing is deleted; tags, favorites, history and scripts live in it —
-/// creates a fresh one, and hands over to the normal startup (`launch`).
+pub(crate) fn database_path() -> std::io::Result<PathBuf> {
+    Ok(get_or_create_config_dir()?.join("gpui-starter.redb"))
+}
+
 pub(crate) struct DatabaseErrorView {
     failure: DbOpenFailure,
-    app_state: ZedisAppState,
-    /// Why the last "Back up & rebuild" attempt failed, shown inline.
+    app_state: AppState,
     rebuild_error: Option<String>,
 }
 
 impl DatabaseErrorView {
-    pub(crate) fn new(failure: DbOpenFailure, app_state: ZedisAppState) -> Self {
+    pub(crate) fn new(failure: DbOpenFailure, app_state: AppState) -> Self {
         Self {
             failure,
             app_state,
@@ -71,8 +62,6 @@ impl DatabaseErrorView {
         }
     }
 
-    /// No `ZedisGlobalStore` exists yet on this path, so translate against
-    /// the locale straight from the loaded state.
     fn text(&self, key: &str) -> SharedString {
         t!(format!("database.{key}"), locale = self.app_state.locale())
             .to_string()
@@ -80,7 +69,15 @@ impl DatabaseErrorView {
     }
 
     fn rebuild(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let quarantined = match quarantine_database() {
+        let path = match database_path() {
+            Ok(path) => path,
+            Err(e) => {
+                self.rebuild_error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let quarantined = match quarantine_database(&path) {
             Ok(path) => path,
             Err(e) => {
                 error!(error = %e, "could not move the local database aside");
@@ -90,21 +87,15 @@ impl DatabaseErrorView {
             }
         };
         warn!(quarantined = %quarantined.display(), "local database moved aside; creating a fresh one");
-        if let Err(e) = init_database() {
+        if let Err(e) = init_database(&path) {
             error!(error = %e, "rebuilding the local database failed");
             self.rebuild_error = Some(e.to_string());
             cx.notify();
             return;
         }
-        init_caches();
         let handle = window.window_handle();
         launch(cx, self.app_state.clone());
         cx.spawn(async move |_this, cx| {
-            // Queued behind `launch`'s own spawn, so the main window is open
-            // before this one goes: on Linux/Windows the default QuitMode
-            // ends the app when the last window closes. The guard keeps the
-            // recovery window around rather than quitting if that ever
-            // doesn't hold.
             cx.update(|cx| {
                 if cx.windows().len() > 1 {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -176,134 +167,10 @@ impl Render for DatabaseErrorView {
     }
 }
 
-/// `true` for a Redis connection link (`redis://` / `rediss://`).
-pub(crate) fn is_redis_url(arg: &str) -> bool {
-    let arg = arg.trim();
-    arg.starts_with("redis://") || arg.starts_with("rediss://")
-}
-
-/// The `redis://` / `rediss://` links among the arguments. The OS hands a
-/// clicked link to the binary this way (the `%u` of the desktop entry, the
-/// `"%1"` of the Windows registry command), and a terminal user can pass one
-/// directly; macOS delivers links through `on_open_urls` instead.
-pub(crate) fn cli_redis_urls() -> Vec<String> {
-    std::env::args().skip(1).filter(|arg| is_redis_url(arg)).collect()
-}
-
-/// A link without its credentials, for the log.
-fn redact_url(url: &str) -> String {
-    match url.split_once("://") {
-        Some((scheme, rest)) => match rest.rsplit_once('@') {
-            Some((_, host)) => format!("{scheme}://***@{host}"),
-            None => url.to_string(),
-        },
-        None => url.to_string(),
-    }
-}
-
-/// Open the first Redis link of `urls` (the rest are ignored — one link is
-/// one connection to land on). Handles links from the OS, a second launch
-/// and the command line alike; an unparsable one becomes a notice.
-pub(crate) fn open_redis_urls(urls: Vec<String>, cx: &mut App) {
-    let Some(url) = urls.into_iter().find(|url| is_redis_url(url)) else {
-        return;
-    };
-    info!(url = %redact_url(&url), "opening redis link");
-    let store = cx.global::<ZedisGlobalStore>().clone();
-    store.update(cx, |state, cx| match RedisServer::from_import_uri(url.trim()) {
-        Ok(server) => state.open_server_from_uri(server, cx),
-        Err(e) => {
-            warn!(error = ?e, url = %redact_url(&url), "redis link rejected");
-            let locale = state.locale().to_string();
-            let message = t!("common.deep_link_invalid", error = format!("{e:?}"), locale = &locale).to_string();
-            cx.emit(GlobalEvent::Notification(NotificationAction::new_error(message.into())));
-        }
-    });
-}
-
-/// Value of a `--flag <value>` / `--flag=<value>` command-line argument.
-pub(crate) fn cli_arg_value(flag: &str) -> Option<String> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == flag {
-            return args.next();
-        }
-        // `strip_prefix('=')` keeps `--db` from matching `--database=x`.
-        if let Some(value) = arg.strip_prefix(flag).and_then(|rest| rest.strip_prefix('=')) {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-/// A parsed `--route <name>` target: app-level routes stand alone, while a
-/// server view still needs the `(id, db)` the startup composer resolves.
-pub(crate) enum CliRoute {
-    App(Route),
-    View(ServerView),
-}
-
-/// Startup view override: `--route <name>` (`home`, `editor`, `metrics`, …).
-/// Together with `--server` / `--db` this is the deep-link MVP behind the
-/// screenshot-comparison workflow. Unrecognized names log a warning and are
-/// ignored.
-pub(crate) fn cli_route_override() -> Option<CliRoute> {
-    let raw = cli_arg_value("--route")?;
-    if let Some(route) = Route::app_from_name(&raw) {
-        return Some(CliRoute::App(route));
-    }
-    match ServerView::from_name(raw.trim().to_ascii_lowercase().as_str()) {
-        Some(view) => Some(CliRoute::View(view)),
-        None => {
-            warn!(route = %raw, "unrecognized --route value; ignoring");
-            None
-        }
-    }
-}
-
-/// Startup connection override: `--server <id|name>`, resolved to a server id
-/// — exact id first, then exact name, then case-insensitive name.
-pub(crate) fn cli_server_override() -> Option<String> {
-    let raw = cli_arg_value("--server")?;
-    let Ok(servers) = get_servers() else {
-        warn!("server config unavailable; ignoring --server");
-        return None;
-    };
-    let found = servers
-        .iter()
-        .find(|s| s.id == raw)
-        .or_else(|| servers.iter().find(|s| s.name == raw))
-        .or_else(|| servers.iter().find(|s| s.name.eq_ignore_ascii_case(&raw)));
-    if found.is_none() {
-        warn!(server = %raw, "no server matches --server by id or name; ignoring");
-    }
-    found.map(|s| s.id.clone())
-}
-
-/// Startup database override: `--db <n>`.
-pub(crate) fn cli_db_override() -> Option<usize> {
-    let raw = cli_arg_value("--db")?;
-    let db = raw.parse::<usize>().ok();
-    if db.is_none() {
-        warn!(db = %raw, "invalid --db value; ignoring");
-    }
-    db
-}
-
-/// True when launched with `ZEDIS_SMOKE_TEST=1` — the CI smoke mode: exit 0
-/// as soon as the first frame has painted, else the watchdog kills the
-/// process with a nonzero code. See the hooks in `main`.
 pub(crate) fn is_smoke_test() -> bool {
-    std::env::var("ZEDIS_SMOKE_TEST").is_ok_and(|v| v == "1")
+    std::env::var("GPUI_STARTER_SMOKE_TEST").is_ok_and(|v| v == "1")
 }
 
-/// `ZEDIS_SMOKE_GATE=window` relaxes the smoke success signal from "first
-/// frame painted" to "main window created and the process survived its
-/// first seconds". Headless Linux CI (Xvfb + llvmpipe) never delivers the
-/// frame-present signal, so the frame gate can't be a hard gate there —
-/// this one still catches the regressions that matter on that platform:
-/// missing system libraries, Vulkan / window-creation failures, startup
-/// panics (DB, config, theme, fonts).
 pub(crate) fn smoke_gate_is_window() -> bool {
-    std::env::var("ZEDIS_SMOKE_GATE").is_ok_and(|v| v == "window")
+    std::env::var("GPUI_STARTER_SMOKE_GATE").is_ok_and(|v| v == "window")
 }

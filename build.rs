@@ -181,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The channel is baked into the binary (`startup::BUILD_CHANNEL`); a
     // changed env must rebuild it.
-    println!("cargo:rerun-if-env-changed=ZEDIS_BUILD_CHANNEL");
+    println!("cargo:rerun-if-env-changed=GPUI_STARTER_BUILD_CHANNEL");
     Emitter::default()
         .add_instructions(&build)?
         .add_instructions(&git2)?
@@ -190,7 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("windows") {
         let mut res = winres::WindowsResource::new();
 
-        res.set_icon("icons/zedis.ico");
+        res.set_icon("icons/gpui-starter.ico");
 
         if let Err(e) = res.compile() {
             eprintln!("Failed to compile Windows resources: {}", e);

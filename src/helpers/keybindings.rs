@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,13 +22,13 @@
 //! ([`new_hot_keys`]) and the ⌘/ reference overlay
 //! ([`shortcut_reference`]) show the same keys.
 
-use crate::helpers::hot_key_table;
+use super::fs::{get_or_create_config_dir, write_file_atomic};
+use super::hot_key_table;
 use gpui::Keystroke;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tracing::warn;
-use zedis_core::fs::{get_or_create_config_dir, write_file_atomic};
 
 pub const KEYBINDINGS_FILE: &str = "keybindings.toml";
 
@@ -123,11 +123,11 @@ fn keystroke_is_valid(keystroke: &str) -> bool {
 /// out, so a user edits in place instead of guessing names.
 pub fn keybindings_template() -> String {
     let mut out = String::from(
-        "# Zedis keyboard shortcuts.\n\
+        "# Keyboard shortcuts.\n\
          #\n\
          # One line per shortcut: id = \"keystroke\". Uncomment a line and change\n\
          # the keystroke; delete it (or comment it out) to restore the default.\n\
-         # Restart Zedis to apply.\n\
+         # Restart the app to apply.\n\
          #\n\
          # Keystroke syntax: modifiers joined with `-`, then the key:\n\
          #   secondary  = Cmd on macOS, Ctrl on Linux / Windows\n\
@@ -179,13 +179,13 @@ mod tests {
 
     #[test]
     fn bad_lines_are_skipped_one_at_a_time() {
-        let text = "command_palette = \"ctrl-shift-p\"\nno_such_id = \"cmd-x\"\nsave = \"nope-x\"\nquit = 3\nterminal = \"ctrl-k ctrl-t\"\n";
+        let text = "command_palette = \"ctrl-shift-p\"\nno_such_id = \"cmd-x\"\nsave = \"nope-x\"\nquit = 3\nnew_tab = \"ctrl-k ctrl-t\"\n";
         let (overrides, warnings) = parse_keybinding_overrides(text);
         assert_eq!(
             overrides.get("command_palette").map(String::as_str),
             Some("ctrl-shift-p")
         );
-        assert_eq!(overrides.get("terminal").map(String::as_str), Some("ctrl-k ctrl-t"));
+        assert_eq!(overrides.get("new_tab").map(String::as_str), Some("ctrl-k ctrl-t"));
         assert_eq!(overrides.len(), 2, "{overrides:?}");
         assert_eq!(warnings.len(), 3, "{warnings:?}");
     }

@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -100,7 +100,7 @@ fn panic_message(info: &PanicHookInfo<'_>) -> String {
 
 fn format_report(context: &CrashContext, message: &str, location: &str, thread: &str, backtrace: &str) -> String {
     format!(
-        "Zedis crash report\n\
+        "crash report\n\
          time: {}\n\
          version: {} ({})\n\
          os: {}\n\
@@ -161,7 +161,7 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("zedis-crash-{}-{name}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("gpui-starter-crash-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).expect("create scratch dir");
             Self(dir)
@@ -212,8 +212,8 @@ mod tests {
     /// only asserts on its own uniquely-named report.
     #[test]
     fn installed_hook_writes_a_report_for_a_panicking_thread() {
-        zedis_core::fs::override_config_dir(
-            std::env::temp_dir().join(format!("zedis-test-config-{}", std::process::id())),
+        crate::helpers::override_config_dir(
+            std::env::temp_dir().join(format!("gpui-starter-test-config-{}", std::process::id())),
         );
         install_panic_hook(context());
         let marker = format!("crash-hook-probe-{}", unix_ts());

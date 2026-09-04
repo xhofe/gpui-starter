@@ -26,13 +26,8 @@ updates:
           - "gpui-pre*"
     ignore:
       # Pinned to gpui-component's transitive versions so the shared types
-      # unify (`lsp-types` for the completion provider, `tree-sitter` for the
-      # Lua grammar registration); bumped by hand with gpui-kit.
+      # unify; bumped by hand with gpui-kit.
       - dependency-name: "lsp-types"
-      - dependency-name: "tree-sitter"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "tree-sitter-lua"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

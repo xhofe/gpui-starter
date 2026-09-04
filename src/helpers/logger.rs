@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,12 +44,12 @@ fn prune_old_logs(dir: &Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        // Only touch our own files: rolling logs (zedis.log.YYYY-MM-DD) and
+        // Only touch our own files: rolling logs (gpui-starter.log.YYYY-MM-DD) and
         // crash reports (crash-<unix-secs>.log).
         let is_log = path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("zedis.log") || n.starts_with(CRASH_REPORT_PREFIX));
+            .is_some_and(|n| n.starts_with("gpui-starter.log") || n.starts_with(CRASH_REPORT_PREFIX));
         if !is_log {
             continue;
         }
@@ -62,7 +62,7 @@ fn prune_old_logs(dir: &Path) {
 }
 
 /// Initialise logging to both stdout and a daily-rolling file under
-/// `<config_dir>/logs/zedis.log.<date>`. The returned [`WorkerGuard`] flushes
+/// `<config_dir>/logs/gpui-starter.log.<date>`. The returned [`WorkerGuard`] flushes
 /// the non-blocking file writer and MUST be kept alive for the whole run; the
 /// file layer is best-effort (returns `None` if the logs dir can't be created),
 /// in which case logging still goes to stdout.
@@ -85,7 +85,7 @@ pub fn init_logger() -> Result<Option<WorkerGuard>, Box<dyn std::error::Error>> 
     let (file_layer, guard) = match logs_dir() {
         Some(logs_dir) => {
             prune_old_logs(&logs_dir);
-            let appender = tracing_appender::rolling::daily(&logs_dir, "zedis.log");
+            let appender = tracing_appender::rolling::daily(&logs_dir, "gpui-starter.log");
             let (non_blocking, guard) = tracing_appender::non_blocking(appender);
             let layer = tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)

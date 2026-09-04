@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ pub fn app_window_icon() -> Option<Arc<image::RgbaImage>> {
 /// Fill in Linux identity fields on a [`WindowOptions`] without clobbering
 /// caller-supplied title / app_id / icon.
 ///
-/// Call this for every window so task switchers group Zedis windows together
+/// Call this for every window so task switchers group this app's windows together
 /// and secondary windows don't fall back to the generic Wayland icon.
 pub fn with_app_identity(mut options: WindowOptions) -> WindowOptions {
     if options.app_id.is_none() {

@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ use tracing::debug;
 use ureq::Proxy;
 
 /// User-configured proxy override, mirrored from the persisted app state
-/// (`ZedisAppState::http_proxy`) at startup and on every save. A process
+/// (`AppState::http_proxy`) at startup and on every save. A process
 /// global because the HTTP callers (updater, AI) run on background threads
 /// with no `cx` to read the store through. Values:
 /// - `""` — follow the environment / OS system proxy (the default);
@@ -83,7 +83,7 @@ fn resolve_configured(configured: &str) -> Resolution {
             Ok(proxy) => return Resolution::Explicit(proxy),
             Err(e) => {
                 // The settings input validates, but a hand-edited
-                // zedis.toml can still hold junk — degrade to the system
+                // gpui-starter.toml can still hold junk — degrade to the system
                 // behavior instead of silently going direct.
                 debug!(%configured, error = %e, "proxy: unusable configured URI, falling back to system");
             }

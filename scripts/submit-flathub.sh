@@ -11,12 +11,12 @@ set -e
 # --submit needs an authenticated `gh` and an SSH key for github.com.
 #
 # First-time submission goes to flathub/flathub (new-pr branch). Once the app
-# is accepted, releases are updated in the dedicated flathub/io.github.vicanso.zedis
+# is accepted, releases are updated in the dedicated flathub/io.github.xhofe.gpui-starter
 # repo instead — push the same two files there and skip this script's PR step.
 
 TAG=${1:?usage: submit-flathub.sh <tag> [--submit]}
 SUBMIT=${2:-}
-APP_ID=io.github.vicanso.zedis
+APP_ID=io.github.xhofe.gpui-starter
 
 cd "$(dirname "$0")/.."
 REPO_ROOT=$(pwd)
@@ -71,7 +71,7 @@ git commit -q -m "Add $APP_ID"
 git push -f "git@github.com:$LOGIN/flathub.git" "$BRANCH"
 gh pr create --repo flathub/flathub --base new-pr --head "$LOGIN:$BRANCH" \
   --title "Add $APP_ID" \
-  --body "Zedis — a native, GPU-accelerated Redis GUI client built in Rust with GPUI.
+  --body "GPUI Starter — a native, GPU-accelerated desktop app template built in Rust with GPUI.
 
-Upstream: https://github.com/vicanso/zedis (Apache-2.0)
+Upstream: https://github.com/xhofe/gpui-starter (Apache-2.0)
 Pinned to $TAG ($COMMIT). I am the upstream author."

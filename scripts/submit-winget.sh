@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Create or update the winget (microsoft/winget-pkgs) manifest for Zedis via
+# Create or update the winget (microsoft/winget-pkgs) manifest via
 # komac — cross-platform, so the PR can be opened straight from macOS/Linux.
 #
 # Usage:
@@ -20,9 +20,9 @@ set -e
 VERSION=${1:?usage: submit-winget.sh <version> [new|update]}
 VERSION=${VERSION#v}
 MODE=${2:-update}
-ID=vicanso.Zedis
-BASE="https://github.com/vicanso/zedis/releases/download/v$VERSION"
-URLS=("$BASE/zedis-windows-x86_64.msi" "$BASE/zedis-windows-aarch64.msi")
+ID=xhofe.GpuiStarter
+BASE="https://github.com/xhofe/gpui-starter/releases/download/v$VERSION"
+URLS=("$BASE/gpui-starter-windows-x86_64.msi" "$BASE/gpui-starter-windows-aarch64.msi")
 
 command -v komac >/dev/null || { echo "komac not found — brew install komac" >&2; exit 1; }
 

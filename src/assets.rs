@@ -1,15 +1,13 @@
 use anyhow::anyhow;
 use gpui::{App, AssetSource, Result, SharedString};
 use gpui_kit::assets::Assets as ComponentAssets;
-use gpui_kit::component::{Icon, ThemeRegistry};
+use gpui_kit::component::ThemeRegistry;
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/**/*.svg"]
-#[include = "commands.json"]
-#[include = "config_docs/*.json"]
 #[include = "icon.png"]
 #[include = "icon-light.png"]
 #[include = "themes/*.json"]
@@ -61,120 +59,5 @@ pub fn register_themes(cx: &mut App) {
         if let Err(err) = registry.load_themes_from_str(content) {
             tracing::warn!(theme = %path, error = %err, "failed to load embedded theme");
         }
-    }
-}
-
-pub enum CustomIconName {
-    Database,
-    DatabaseZap,
-    FileXCorner,
-    FilePenLine,
-    FilePlusCorner,
-    ChevronsDown,
-    ChevronUp,
-    FileCheckCorner,
-    Clock3,
-    Flame,
-    Undo2,
-    UserRoundPlus,
-    Zap,
-    Network,
-    Equal,
-    Activity,
-    RotateCw,
-    CircleCheckBig,
-    CircleDotDashed,
-    X,
-    MemoryStick,
-    AudioWaveform,
-    Binary,
-    ListChecvronsDownUp,
-    Lock,
-    LockOpen,
-    Link,
-    Unlink,
-    SwatchBook,
-    Eraser,
-    Save,
-    ListCheck,
-    Square,
-    SquareCheck,
-    ListX,
-    Snail,
-    Rss,
-    Laptop,
-    HardDrive,
-    Radar,
-    SunMoon,
-    Download,
-    Upload,
-    GitCompareArrows,
-    Languages,
-    Command,
-    Keyboard,
-    RefreshCw,
-    Power,
-}
-
-impl CustomIconName {
-    pub fn path(self) -> SharedString {
-        match self {
-            CustomIconName::Database => "icons/database.svg",
-            CustomIconName::DatabaseZap => "icons/database-zap.svg",
-            CustomIconName::FileXCorner => "icons/file-x-corner.svg",
-            CustomIconName::FilePenLine => "icons/file-pen-line.svg",
-            CustomIconName::FilePlusCorner => "icons/file-plus-corner.svg",
-            CustomIconName::ChevronsDown => "icons/chevrons-down.svg",
-            CustomIconName::ChevronUp => "icons/chevron-up.svg",
-            CustomIconName::FileCheckCorner => "icons/file-check-corner.svg",
-            CustomIconName::Clock3 => "icons/clock-3.svg",
-            CustomIconName::Flame => "icons/flame.svg",
-            CustomIconName::Undo2 => "icons/undo-2.svg",
-            CustomIconName::UserRoundPlus => "icons/user-round-plus.svg",
-            CustomIconName::Zap => "icons/zap.svg",
-            CustomIconName::Network => "icons/network.svg",
-            CustomIconName::Equal => "icons/equal.svg",
-            CustomIconName::Activity => "icons/activity.svg",
-            CustomIconName::RotateCw => "icons/rotate-cw.svg",
-            CustomIconName::CircleCheckBig => "icons/circle-check-big.svg",
-            CustomIconName::CircleDotDashed => "icons/circle-dot-dashed.svg",
-            CustomIconName::X => "icons/x.svg",
-            CustomIconName::MemoryStick => "icons/memory-stick.svg",
-            CustomIconName::AudioWaveform => "icons/audio-waveform.svg",
-            CustomIconName::Binary => "icons/binary.svg",
-            CustomIconName::ListChecvronsDownUp => "icons/list-chevrons-down-up.svg",
-            CustomIconName::Lock => "icons/lock.svg",
-            CustomIconName::LockOpen => "icons/lock-open.svg",
-            CustomIconName::Link => "icons/link.svg",
-            CustomIconName::Unlink => "icons/unlink.svg",
-            CustomIconName::SwatchBook => "icons/swatch-book.svg",
-            CustomIconName::Eraser => "icons/eraser.svg",
-            CustomIconName::Save => "icons/save.svg",
-            CustomIconName::ListCheck => "icons/list-check.svg",
-            CustomIconName::Square => "icons/square.svg",
-            CustomIconName::SquareCheck => "icons/square-check.svg",
-            CustomIconName::ListX => "icons/list-x.svg",
-            CustomIconName::Snail => "icons/snail.svg",
-            CustomIconName::Rss => "icons/rss.svg",
-            CustomIconName::Laptop => "icons/laptop.svg",
-            CustomIconName::HardDrive => "icons/hard-drive.svg",
-            CustomIconName::Radar => "icons/radar.svg",
-            CustomIconName::SunMoon => "icons/sun-moon.svg",
-            CustomIconName::Download => "icons/download.svg",
-            CustomIconName::Upload => "icons/upload.svg",
-            CustomIconName::GitCompareArrows => "icons/git-compare-arrows.svg",
-            CustomIconName::Languages => "icons/languages.svg",
-            CustomIconName::Command => "icons/command.svg",
-            CustomIconName::Keyboard => "icons/keyboard.svg",
-            CustomIconName::RefreshCw => "icons/refresh-cw.svg",
-            CustomIconName::Power => "icons/power.svg",
-        }
-        .into()
-    }
-}
-
-impl From<CustomIconName> for Icon {
-    fn from(val: CustomIconName) -> Self {
-        Icon::empty().path(val.path())
     }
 }

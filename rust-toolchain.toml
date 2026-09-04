@@ -5,7 +5,7 @@
 # is version-sensitive: every release adds lints).
 #
 # Bumping the version: update `channel` here AND the `RUST_TOOLCHAIN` env
-# in .github/workflows/{lint,integration,publish,smoke}.yml (the lint
+# in .github/workflows/{lint,publish,smoke}.yml (the lint
 # workflow fails with a pointer here if they drift) + the Toolchain line
 # in CLAUDE.md.
 [toolchain]

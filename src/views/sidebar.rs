@@ -1,4 +1,4 @@
-// Copyright 2026 Tree xie.
+// Copyright 2026 Andy Hsu.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,745 +12,92 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{
-    assets::{Assets, CustomIconName},
-    connection::get_servers,
-    constants::{EDITOR_KEY_BAR_HEIGHT, STATUS_BAR_HEIGHT},
-    helpers::{humanize_keystroke, resolve_tag_color},
-    states::{GlobalEvent, Route, ZedisGlobalStore, i18n_servers, i18n_sidebar, update_app_state_and_save},
-};
-use gpui::{Context, Hsla, Image, ImageFormat, SharedString, Subscription, Window, div, img, prelude::*, px, rgb};
-use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::tooltip::Tooltip;
+use crate::states::{GlobalStore, Route, i18n_sidebar, update_app_state_and_save};
+use crate::views::open_about_window;
+use gpui::{App, Window, div, prelude::*};
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName, Sizable, StyledExt,
+    ActiveTheme, IconName,
     button::{Button, ButtonVariants},
-    h_flex,
-    label::Label,
-    list::ListItem,
-    v_flex,
+    h_flex, v_flex,
 };
-use rust_i18n::t;
-use std::sync::Arc;
-use tracing::info;
 
-/// Internal state for sidebar component
-///
-/// Caches server list bucketed by group, so the render pass only has
-/// to read collapse state and lay out rows. The home row is rendered
-/// separately and is not stored here.
-#[derive(Default)]
-struct SidebarState {
-    /// Server sections in canonical sort order — same partitioning
-    /// the servers page uses (`servers.rs`'s group loop), so the
-    /// collapse state stored in `ZedisGlobalStore::collapsed_server_groups`
-    /// applies consistently across both views.
-    sections: Vec<SidebarSection>,
+pub struct Sidebar;
 
-    /// Currently selected server ID (empty string means home page)
-    server_id: SharedString,
-}
-
-#[derive(Clone, Default)]
-struct SidebarSection {
-    /// Stable collapse key — the trimmed group name, or `"__none__"`
-    /// for ungrouped. Matches the key the servers page passes to
-    /// `is_server_group_collapsed` / `toggle_server_group_collapsed`,
-    /// so collapse decisions stay in sync.
-    key: String,
-    /// Raw group string. `None` means ungrouped; resolved to the
-    /// localized "Ungrouped" label at render time (locale switches
-    /// don't currently re-trigger `update_server_names`, so resolve
-    /// late rather than caching).
-    group: Option<String>,
-    servers: Vec<SidebarServerEntry>,
-}
-
-#[derive(Clone, Default)]
-struct SidebarServerEntry {
-    id: SharedString,
-    name: SharedString,
-    tag: SharedString,
-    color: Option<Hsla>,
-}
-
-/// Sidebar navigation component
-///
-/// Features:
-/// - Star button (link to GitHub)
-/// - Server list for quick navigation between servers and home
-/// - Settings menu with theme and language options
-///
-/// The sidebar provides quick access to:
-/// - Home page (server management)
-/// - Connected Redis servers
-/// - Application settings (theme, language)
-pub struct ZedisSidebar {
-    /// Internal state with cached server list
-    state: SidebarState,
-
-    /// App logo (bundled icon.png), decoded lazily by gpui's image cache.
-    /// Built once here so renders don't re-wrap the bytes every frame.
-    logo: Arc<Image>,
-
-    /// Light variant (icon-light.png) shown on dark themes, where the
-    /// default mark doesn't contrast enough against the panel background.
-    logo_light: Arc<Image>,
-
-    /// Event subscriptions for reactive updates
-    _subscriptions: Vec<Subscription>,
-}
-
-impl ZedisSidebar {
-    /// Create a new sidebar component with event subscriptions
-    ///
-    /// Sets up listeners for:
-    /// - Server selection changes (updates current selection)
-    /// - Server list updates (refreshes displayed servers)
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut subscriptions = vec![];
-
-        let global_state = cx.global::<ZedisGlobalStore>().state();
-        subscriptions.push(cx.subscribe(&global_state, |this, _global_state, event, cx| {
-            match event {
-                GlobalEvent::ServerListUpdated => {
-                    this.update_server_names(cx);
-                }
-                GlobalEvent::ServerSelected(server_id, _) => {
-                    // Refresh server list when servers are added/removed/updated
-                    this.state.server_id = server_id.clone();
-                }
-                _ => {}
-            }
-            cx.notify();
-        }));
-
-        let load_logo = |name: &str| {
-            let bytes = Assets::get(name).map(|item| item.data).unwrap_or_default();
-            Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
-        };
-        let mut this = Self {
-            state: SidebarState::default(),
-            logo: load_logo("icon.png"),
-            logo_light: load_logo("icon-light.png"),
-            _subscriptions: subscriptions,
-        };
-
-        info!("Creating new sidebar view");
-
-        // Load initial server list
-        this.update_server_names(cx);
-        this
+impl Sidebar {
+    pub fn new(_cx: &mut App) -> Self {
+        Self
     }
+}
 
-    /// Rebuild the cached `sections` from the current server config.
-    ///
-    /// Mirrors the bucketing in `views::servers::render_server_grid`:
-    /// `get_servers()` returns servers in canonical order (group A→Z,
-    /// then sort_order ASC, ungrouped last), so a single pass that
-    /// merges adjacent same-group entries reconstructs the groups
-    /// without sorting.
-    fn update_server_names(&mut self, _cx: &mut Context<Self>) {
-        let Ok(servers) = get_servers() else { return };
+impl Render for Sidebar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let store = cx.global::<GlobalStore>().read(cx);
+        let collapsed = store.sidebar_collapsed();
+        let route = store.route();
+        let width = store.sidebar_px();
 
-        let mut sections: Vec<SidebarSection> = Vec::new();
-        for server in servers.iter() {
-            let group = server
-                .group
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-            let key = group.as_deref().unwrap_or("__none__").to_string();
-
-            let entry = SidebarServerEntry {
-                id: server.id.clone().into(),
-                name: server.name.clone().into(),
-                tag: server.tag_label().unwrap_or_default().to_string().into(),
-                color: resolve_tag_color(server.tag_color.as_deref()),
-            };
-
-            match sections.last_mut() {
-                Some(s) if s.key == key => s.servers.push(entry),
-                _ => sections.push(SidebarSection {
-                    key,
-                    group,
-                    servers: vec![entry],
-                }),
-            }
-        }
-
-        self.state.sections = sections;
-    }
-
-    /// Render the scrollable server list.
-    ///
-    /// Layout:
-    /// - Home row at the very top (never inside a group)
-    /// - One section per server group, each with a collapsible header
-    ///   ("Production · 3") + the section's server rows
-    /// - Ungrouped servers live in the last section, headed by the
-    ///   localized "Ungrouped" label and the `__none__` collapse key
-    ///
-    /// Collapse state is read directly from `ZedisGlobalStore` so the
-    /// same key the servers page toggles also collapses the sidebar
-    /// section. A collapsed section still renders its header (so the
-    /// user can re-expand) but skips all of its server rows.
-    fn render_server_list(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let current_server_id = self.state.server_id.clone();
-        // The config editor (`Route::Server(ServerView::Config)`) operates on the active server, so
-        // it keeps that server row highlighted; only the Protos / Scripts
-        // managers drop the server-row selection.
-        let is_match_route = !matches!(
-            cx.global::<ZedisGlobalStore>().read(cx).route(),
-            Route::Protos | Route::Scripts,
-        );
-
-        // App brand name as the top entry — matches the convention
-        // used by other places that show the product name ("Zedis"
-        // is hard-coded in `main.rs`'s window title, `tray.rs`, and
-        // `about.rs`; following the same pattern rather than adding
-        // an APP_NAME constant just for this one site).
-        let home_label = SharedString::from("ZEDIS");
-        let ungrouped_label = i18n_servers(cx, "ungrouped_label");
-        // Discoverability hints appended to every server row's tooltip: the
-        // workspace-tab gestures (⌘/Ctrl+click to reveal-or-open, add Shift to
-        // force a duplicate tab) are otherwise invisible. `%{key}` is filled
-        // with the platform keystroke (⌘/⌘⇧ on macOS, Ctrl/Ctrl+Shift else).
-        let store = cx.global::<ZedisGlobalStore>().read(cx);
-        let locale = store.locale().to_string();
-        // When the setting makes a plain click open a tab, ⌘/Ctrl+click inverts
-        // to switching in place — so the modifier hint flips accordingly.
-        let new_tab_hint: SharedString = if store.sidebar_click_new_tab() {
-            t!(
-                "sidebar.open_in_current_tab_hint",
-                key = humanize_keystroke("secondary"),
-                locale = locale
-            )
-        } else {
-            t!(
-                "sidebar.open_in_new_tab_hint",
-                key = humanize_keystroke("secondary"),
-                locale = locale
-            )
-        }
-        .to_string()
-        .into();
-        let dup_tab_hint: SharedString = t!(
-            "sidebar.open_in_new_tab_dup_hint",
-            key = humanize_keystroke("secondary-shift"),
-            locale = locale
-        )
-        .to_string()
-        .into();
-        // `list_active` from the theme is intentionally subtle for
-        // tightly-packed list views, but in this sparse sidebar it
-        // reads as ~no change. Use a 10% foreground overlay instead:
-        // ~rgba(255,255,255,0.1) in dark mode, ~rgba(0,0,0,0.1) in
-        // light mode. Theme-neutral so any tag colour underneath
-        // still reads — important because tagged servers keep their
-        // tag-coloured icon on top of the selection pill.
-        let list_active_color = cx.theme().foreground.alpha(0.1);
-        // Both home and server rows use the same muted/foreground
-        // toggle on selection so the icon column registers selection,
-        // not just the 3px right strip. The server's tag colour is no
-        // longer painted onto the icon itself (it read as jarring) —
-        // the icon stays a calm muted/foreground grey and the tag
-        // colour shows as a small dot badge at the icon's lower-right
-        // corner instead.
-        let muted_icon_color = cx.theme().muted_foreground;
-        let active_icon_color = cx.theme().foreground;
-        // Subtle 1px divider drawn between the home row and the first
-        // group section to set Home apart visually as a top-level
-        // entry, distinct from the group/server tree below it.
-        let divider_color = cx.theme().border;
-        // Icon accent (#6b95c4, same in both themes) for the selected server's
-        // database icon / monogram.
-        let accent_color: Hsla = rgb(0x6b95c4).into();
-        // The left bar marking the selected row uses the theme's primary (the
-        // same blue as primary buttons, set in `main.rs`) — a deliberately
-        // stronger accent than the icon's.
-        let selection_bar_color = cx.theme().primary;
-        // Green status dot on the selected server's row (#69b083 — same green as
-        // the status-bar "Connected" indicator).
-        let connected_color: Hsla = rgb(0x69b083).into();
-        // Ring colour around the tag dot so it reads as a crisp badge over the
-        // icon instead of bleeding into the glyph — matches the sidebar panel
-        // background (see main.rs).
-        let dot_ring_color = cx.theme().background;
-
-        // Snapshot collapse state up front so the click closures
-        // don't need to re-borrow `cx`. Server counts are bounded
-        // (typically < 50), so a HashSet is overkill — a Vec walk
-        // would be fine — but HashSet keeps the lookup site terse.
-        let global_store_ref = cx.global::<ZedisGlobalStore>().read(cx);
-        // Whole-sidebar collapse (icon-only rail). Distinct from per-group
-        // `collapsed_keys` below.
-        let sidebar_collapsed = global_store_ref.sidebar_collapsed();
-        let collapsed_keys: std::collections::HashSet<String> = self
-            .state
-            .sections
-            .iter()
-            .filter(|s| global_store_ref.is_server_group_collapsed(&s.key))
-            .map(|s| s.key.clone())
-            .collect();
-
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
-
-        // --- Home row ---
-        // Always at the top, outside every group. Highlights when
-        // no server is selected (server_id empty) and the route is
-        // one of the server-context routes.
-        let is_home_current = is_match_route && current_server_id.is_empty();
-        let home_item = ListItem::new("sidebar-home-item")
-            .w_full()
+        v_flex()
+            .w(width)
             .h_full()
-            .px_2()
-            .rounded_md()
+            .p_2()
+            .gap_1()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .overflow_hidden()
-                    .when(sidebar_collapsed, |this| this.justify_center())
-                    // Top slot is Home in both states: the collapsed rail keeps
-                    // just the app logo (the expand toggle lives in the fixed
-                    // bottom bar), the expanded sidebar adds the heading. The
-                    // logo is a bitmap (no theme tinting), so dark themes swap
-                    // in the light variant for contrast; picked per render so a
-                    // live theme switch updates it immediately.
-                    .child(
-                        img(if cx.theme().is_dark() {
-                            self.logo_light.clone()
-                        } else {
-                            self.logo.clone()
-                        })
-                        .flex_none()
-                        .size(px(18.)),
-                    )
-                    .when(!sidebar_collapsed, |this| {
-                        this.child(
-                            Label::new(home_label.clone())
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(active_icon_color)
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .flex_1()
-                                .min_w_0(),
-                        )
+                Button::new("nav-home")
+                    .ghost()
+                    .icon(IconName::LayoutDashboard)
+                    .when(!collapsed, |b| b.label(i18n_sidebar(cx, "home")))
+                    .when(route == Route::Home, |b| b.primary())
+                    .on_click(|_, _, cx| {
+                        cx.global::<GlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.go_to(Route::Home, cx));
                     }),
             )
-            .on_click(move |e, _window, cx| {
-                // Mirror the server rows: a plain click navigates the current
-                // tab to Home; the `sidebar_click_new_tab` setting (⌘/Ctrl
-                // inverts, ⌘⇧ forces) opens Home in a workspace tab instead. An
-                // empty server id is the Home "connection" the tab machinery
-                // already understands (project_active_tab / ServerSelected).
-                let mods = e.modifiers();
-                let secondary = mods.secondary();
-                let force_new = secondary && mods.shift;
-                let default_new_tab = cx.global::<ZedisGlobalStore>().read(cx).sidebar_click_new_tab();
-                let want_new_tab = force_new || (default_new_tab != secondary);
-                if is_home_current && !want_new_tab {
-                    return;
-                }
-                cx.update_global::<ZedisGlobalStore, ()>(|store, cx| {
-                    store.update(cx, |state, cx| {
-                        if force_new {
-                            state.open_server_in_new_tab(String::new(), 0, cx);
-                        } else if want_new_tab {
-                            state.reveal_or_open_server_tab(String::new(), 0, cx);
-                        } else {
-                            state.go_to(Route::Home, cx);
-                            state.clear_selected_server(cx);
-                        }
-                    });
-                });
-            });
-        // Fixed-height top band (== the editor's key bar) with the Home pill
-        // vertically centered, so the sidebar's top row lines up with the
-        // content pane's top bar instead of sitting a couple px off.
-        let home_tooltip = i18n_sidebar(cx, "home");
-        let collapse_label = i18n_sidebar(cx, "collapse");
-        rows.push(
-            h_flex()
-                .id("sidebar-home-row")
-                .mx_2()
-                .h(EDITOR_KEY_BAR_HEIGHT)
-                .items_center()
-                .gap_1()
-                .child(div().flex_1().min_w_0().h_full().child(home_item))
-                // Collapse control at the band's right edge (the sidebar's
-                // top-right). Icon-only: a label would fight the ZEDIS
-                // heading for this narrow strip — the tooltip carries the
-                // word. The expand control (collapsed state) stays in the
-                // fixed bottom bar rendered by `render`.
-                .when(!sidebar_collapsed, |this| {
-                    this.child(
-                        Button::new("sidebar-collapse-toggle")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ChevronLeft)
-                            .tooltip(collapse_label)
-                            .on_click(move |_, _window, cx| {
-                                update_app_state_and_save(cx, "toggle_sidebar_collapsed", |state, _| {
-                                    state.toggle_sidebar_collapsed();
-                                });
-                            }),
-                    )
-                })
-                .border_b_1()
-                .border_color(divider_color)
-                .when(sidebar_collapsed, |this| {
-                    this.tooltip(move |window, cx| Tooltip::new(home_tooltip.clone()).build(window, cx))
-                })
-                .into_any_element(),
-        );
-
-        // --- Group sections ---
-        for (section_idx, section) in self.state.sections.iter().enumerate() {
-            let is_collapsed = collapsed_keys.contains(&section.key);
-            // Group header — hidden in the collapsed icon rail.
-            if !sidebar_collapsed {
-                let header_label = match &section.group {
-                    Some(g) => SharedString::from(g.clone()),
-                    None => ungrouped_label.clone(),
-                };
-                let count_label = SharedString::from(section.servers.len().to_string());
-                let chevron = if is_collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                };
-                let toggle_key = section.key.clone();
-                let header_id = SharedString::from(format!("sidebar-grp-h-{}", section.key));
-                rows.push(
-                    h_flex()
-                        .id(header_id)
-                        .mx_2()
-                        .h_6()
-                        .gap_1()
-                        .items_center()
-                        .cursor_pointer()
-                        .child(Icon::new(chevron).text_color(muted_icon_color))
-                        .child(
-                            Label::new(header_label)
-                                .text_xs()
-                                .text_color(muted_icon_color)
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .flex_1()
-                                .min_w_0(),
-                        )
-                        .child(Label::new(count_label).text_xs().text_color(muted_icon_color))
-                        .on_click(move |_, _window, cx| {
-                            let key = toggle_key.clone();
-                            update_app_state_and_save(cx, "toggle_server_group_collapsed", move |state, _| {
-                                state.toggle_server_group_collapsed(&key);
-                            });
-                        })
-                        .into_any_element(),
-                );
-            } else if section_idx > 0 {
-                // Collapsed rail: a short divider keeps groups visually separated.
-                rows.push(div().mx_2().h_px().my_1().bg(divider_color).into_any_element());
-            }
-
-            // Per-group collapse only applies to the expanded sidebar: the icon
-            // rail hides group headers, so a skipped group would be an
-            // unexplained blank between dividers with no way to re-expand it.
-            // The rail always shows every server's monogram.
-            if is_collapsed && !sidebar_collapsed {
-                continue;
-            }
-
-            for server in &section.servers {
-                let entry = server.clone();
-                let is_current = is_match_route && entry.id == current_server_id;
-                let name = entry.name.clone();
-                // Full, untruncated name for the row tooltip — the
-                // visible label uses text_ellipsis in this narrow
-                // strip so long names ("aliyun-clu…") are unreadable
-                // without it. Append the tag label when one is set
-                // ("aliyun-cluster · prod"); the corner dot carries
-                // the colour, the tooltip carries the word.
-                let tooltip_text: SharedString = if entry.tag.is_empty() {
-                    name.clone()
-                } else {
-                    SharedString::from(format!("{} · {}", name, entry.tag))
-                };
-
-                let server_id = entry.id.clone();
-                let tag_color = entry.color;
-                let icon_color = if is_current { accent_color } else { muted_icon_color };
-                // Initials for the collapsed rail so servers stay tellable apart
-                // at a glance: two letters for Latin names ("upstash" → "UP"), but
-                // a single glyph for CJK so a wide character (缓 / 中) isn't cramped.
-                let monogram: SharedString = {
-                    let mut chars = name.chars().filter(|c| c.is_alphanumeric());
-                    match chars.next() {
-                        Some(first) if first.is_ascii() => {
-                            let mut s = first.to_ascii_uppercase().to_string();
-                            if let Some(second) = chars.next().filter(|c| c.is_ascii()) {
-                                s.push(second.to_ascii_uppercase());
-                            }
-                            s
-                        }
-                        Some(first) => first.to_string(),
-                        None => "?".to_string(),
-                    }
-                    .into()
-                };
-
-                let item_id = SharedString::from(format!("sidebar-srv-{}", entry.id));
-                let item = ListItem::new(item_id)
-                    .w_full()
-                    .h_8()
-                    // Collapsed rail centers the icon; expanded indents the row.
-                    .when(!sidebar_collapsed, |this| this.pl_4().pr_2())
-                    .when(sidebar_collapsed, |this| this.px_1())
-                    .rounded_md()
-                    // Expanded: the full-row pill marks selection. Collapsed: the
-                    // monogram box carries the fill, so skip the row bg here to
-                    // avoid a doubled (wider, lighter) background behind it.
-                    .when(is_current && !sidebar_collapsed, |this| this.bg(list_active_color))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .w_full()
-                            .overflow_hidden()
-                            .when(sidebar_collapsed, |this| this.justify_center())
-                            // Expanded: database-cylinder icon with the tag colour
-                            // as a corner dot badge (ringed so it doesn't merge in).
-                            .when(!sidebar_collapsed, |this| {
-                                this.child(
-                                    div()
-                                        .relative()
-                                        .flex_none()
-                                        .child(Icon::new(CustomIconName::Database).text_color(icon_color))
-                                        .when_some(tag_color, |this, color| {
-                                            this.child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom_0()
-                                                    .right_0()
-                                                    .size(px(8.))
-                                                    .rounded_full()
-                                                    .bg(color)
-                                                    .border_2()
-                                                    .border_color(dot_ring_color),
-                                            )
-                                        }),
-                                )
-                            })
-                            // Collapsed rail: an initials monogram (tag dot kept) so
-                            // each server is distinguishable without expanding.
-                            .when(sidebar_collapsed, |this| {
-                                this.child(
-                                    div()
-                                        .relative()
-                                        .flex_none()
-                                        .size(px(28.))
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        // Only the selected server gets a filled box
-                                        // (design); the rest are plain letters.
-                                        .when(is_current, |this| this.bg(list_active_color))
-                                        .child(Label::new(monogram).text_xs().font_bold().text_color(icon_color))
-                                        // Corner dot: green for the selected server,
-                                        // else the tag colour for tagged servers.
-                                        .when(is_current, |this| {
-                                            this.child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom_0()
-                                                    .right_0()
-                                                    .size(px(9.))
-                                                    .rounded_full()
-                                                    .bg(connected_color)
-                                                    .border_2()
-                                                    .border_color(dot_ring_color),
-                                            )
-                                        })
-                                        .when(!is_current, |this| {
-                                            this.when_some(tag_color, |this, color| {
-                                                this.child(
-                                                    div()
-                                                        .absolute()
-                                                        .bottom_0()
-                                                        .right_0()
-                                                        .size(px(9.))
-                                                        .rounded_full()
-                                                        .bg(color)
-                                                        .border_2()
-                                                        .border_color(dot_ring_color),
-                                                )
-                                            })
-                                        }),
-                                )
-                            })
-                            // Name + selected green dot — hidden in the icon rail
-                            // (the wrapper tooltip surfaces the name on hover).
-                            .when(!sidebar_collapsed, |this| {
-                                this.child(
-                                    Label::new(name)
-                                        .text_xs()
-                                        // Not restyled on selection: the left bar (and
-                                        // the icon) carry the accent, the name stays in
-                                        // the default foreground.
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .flex_1()
-                                        .min_w_0(),
-                                )
-                                .when(is_current, |this| {
-                                    this.child(div().flex_none().size(px(7.)).rounded_full().bg(connected_color))
-                                })
-                            }),
-                    )
-                    .on_click(move |e, _window, cx| {
-                        // A no-modifier click either switches the current tab in
-                        // place or opens a workspace tab, per the
-                        // `sidebar_click_new_tab` setting. ⌘/Ctrl+click inverts
-                        // that choice for this click; ⌘⇧+click always forces a
-                        // fresh duplicate tab. The in-place case on the current
-                        // server is a no-op (as a plain re-click always was).
-                        let mods = e.modifiers();
-                        let secondary = mods.secondary();
-                        let force_new = secondary && mods.shift;
-                        let default_new_tab = cx.global::<ZedisGlobalStore>().read(cx).sidebar_click_new_tab();
-                        let want_new_tab = force_new || (default_new_tab != secondary);
-                        if is_current && !want_new_tab {
-                            return;
-                        }
-                        cx.update_global::<ZedisGlobalStore, ()>(|store, cx| {
-                            store.update(cx, |state, cx| {
-                                let id = server_id.to_string();
-                                let db = state.open_db_for(&id);
-                                if force_new {
-                                    state.open_server_in_new_tab(id, db, cx);
-                                } else if want_new_tab {
-                                    state.reveal_or_open_server_tab(id, db, cx);
-                                } else {
-                                    state.connect_server(id, db, cx);
-                                }
-                            });
-                        });
-                    });
-
-                // ListItem doesn't impl InteractiveElement, so the
-                // tooltip lives on a thin stateful wrapper.
-                let wrap_id = SharedString::from(format!("sidebar-srv-w-{}", entry.id));
-                rows.push(
-                    div()
-                        .id(wrap_id)
-                        .mx_2()
-                        // A little breathing room between monograms in the
-                        // collapsed rail (without reading as an over-spaced list).
-                        .when(sidebar_collapsed, |this| this.my_1())
-                        .relative()
-                        // Left accent bar marks the selected server (design).
-                        .when(is_current, |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top(px(6.))
-                                    .bottom(px(6.))
-                                    .w(px(2.5))
-                                    .rounded_sm()
-                                    .bg(selection_bar_color),
-                            )
-                        })
-                        .child(item)
-                        .tooltip({
-                            let name = tooltip_text.clone();
-                            let hint = new_tab_hint.clone();
-                            let dup_hint = dup_tab_hint.clone();
-                            move |window, cx| {
-                                let name = name.clone();
-                                let hint = hint.clone();
-                                let dup_hint = dup_hint.clone();
-                                Tooltip::element(move |_window, cx| {
-                                    let muted = cx.theme().muted_foreground;
-                                    v_flex()
-                                        .gap_0p5()
-                                        .child(name.clone())
-                                        .child(div().text_xs().text_color(muted).child(hint.clone()))
-                                        .child(div().text_xs().text_color(muted).child(dup_hint.clone()))
-                                })
-                                .build(window, cx)
-                            }
-                        })
-                        .into_any_element(),
-                );
-            }
-        }
-
-        v_flex()
-            .id("sidebar-redis-servers")
-            .size_full()
-            // No top padding: the fixed-height Home band above must sit flush
-            // at the top so it aligns with the content pane's top bar. Keep the
-            // bottom breathing room.
-            .pb_2()
-            .overflow_y_scrollbar()
-            .children(rows)
-    }
-}
-
-impl Render for ZedisSidebar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Expanded: the collapse control sits at the top-right of the Home
-        // band (see `render_server_list`). Collapsed: the rail is too narrow
-        // to fit a control beside the logo, so the expand toggle keeps a
-        // fixed (non-scrolling) bottom bar — present on every route so the
-        // rail can always be expanded again. Between the two, one toggle is
-        // always visible in either state.
-        let sidebar_collapsed = cx.global::<ZedisGlobalStore>().read(cx).sidebar_collapsed();
-        let border = cx.theme().border;
-        v_flex()
-            .size_full()
-            .id("sidebar-container")
-            .justify_start()
-            .border_r_1()
-            .border_color(border)
             .child(
-                div()
-                    .flex_1()
-                    .size_full()
-                    .min_h_0()
-                    .child(self.render_server_list(window, cx)),
+                Button::new("nav-todos")
+                    .ghost()
+                    .icon(IconName::Check)
+                    .when(!collapsed, |b| b.label(i18n_sidebar(cx, "todos")))
+                    .when(route == Route::Todos, |b| b.primary())
+                    .on_click(|_, _, cx| {
+                        cx.global::<GlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.go_to(Route::Todos, cx));
+                    }),
             )
-            .when(sidebar_collapsed, |this| {
-                this.child(
-                    h_flex()
-                        .flex_none()
-                        .w_full()
-                        // Same height as the status bar to its right (which ends at
-                        // the sidebar's edge), so the toggle sits on that bar's line.
-                        // No top border: the sidebar is one continuous panel, and a
-                        // rule here would only cut it in two.
-                        .h(STATUS_BAR_HEIGHT)
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            // The collapsed rail is too narrow for text — icon-only.
-                            Button::new("sidebar-expand-toggle")
-                                .ghost()
-                                .icon(IconName::ChevronRight)
-                                .on_click(move |_, _window, cx| {
-                                    update_app_state_and_save(cx, "toggle_sidebar_collapsed", |state, _| {
-                                        state.toggle_sidebar_collapsed();
-                                    });
-                                }),
-                        ),
-                )
-            })
+            .child(div().flex_1())
+            .child(
+                Button::new("nav-settings")
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .when(!collapsed, |b| b.label(i18n_sidebar(cx, "preferences")))
+                    .on_click(|_, _, cx| crate::views::open_settings_window(cx)),
+            )
+            .child(
+                Button::new("nav-about")
+                    .ghost()
+                    .icon(IconName::Info)
+                    .when(!collapsed, |b| b.label(i18n_sidebar(cx, "about")))
+                    .on_click(|_, _, cx| open_about_window(cx)),
+            )
+            .child(
+                h_flex().child(
+                    Button::new("sidebar-collapse")
+                        .ghost()
+                        .icon(if collapsed {
+                            IconName::PanelLeftOpen
+                        } else {
+                            IconName::PanelLeftClose
+                        })
+                        .on_click(move |_, _, cx| {
+                            update_app_state_and_save(cx, "toggle_sidebar", move |state, _| {
+                                state.set_sidebar_collapsed(!collapsed);
+                            });
+                        }),
+                ),
+            )
     }
 }
