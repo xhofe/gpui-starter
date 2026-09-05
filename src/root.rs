@@ -623,8 +623,6 @@ fn moved_active_index(active: usize, from: usize, to: usize) -> usize {
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = Root::render_dialog_layer(window, cx);
-        let _ = Root::render_notification_layer(window, cx);
         let current_bounds = window.bounds();
         if current_bounds != self.last_bounds {
             let display = window
@@ -777,5 +775,7 @@ impl Render for AppRoot {
             )
             .child(self.command_palette.clone())
             .child(self.shortcuts_overlay.clone())
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }

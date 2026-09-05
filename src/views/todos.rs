@@ -86,6 +86,7 @@ impl Todos {
             .message(t_delete_body(cx, &title))
             .button_props(dialog_button_props(cx))
             .ok_text(i18n_common(cx, "delete"))
+            .cancel_text(i18n_common(cx, "cancel"))
             .on_ok(move |_, _, cx| {
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
