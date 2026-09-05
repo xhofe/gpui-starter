@@ -750,7 +750,15 @@ impl Render for AppRoot {
                 WindowAction::Zoom => window.zoom_window(),
                 WindowAction::ToggleFullscreen => window.toggle_fullscreen(),
             }))
-            .on_action(|_: &MemuAction, _, _| {})
+            // ⌘W closes the active workspace tab while more than one is open.
+            // Otherwise propagate so the app-level handler can hide / close.
+            .on_action(cx.listener(|this, e: &MemuAction, _window, cx| {
+                if matches!(e, MemuAction::Close) && this.tabs.len() > 1 {
+                    this.close_tab(this.active_tab, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .child(
                 self.title_bar
                     .as_ref()
@@ -758,13 +766,13 @@ impl Render for AppRoot {
                     .unwrap_or_else(|| h_flex().into_any_element()),
             )
             .child(
-                h_flex().size_full().min_h_0().child(self.sidebar.clone()).child(
+                h_flex().flex_1().min_h_0().w_full().child(self.sidebar.clone()).child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .min_h_0()
+                        .h_full()
                         .when_some(tab_bar, |this, bar| this.child(bar))
-                        .child(active_content),
+                        .child(v_flex().flex_1().min_h_0().w_full().child(active_content)),
                 ),
             )
             .child(self.command_palette.clone())

@@ -50,7 +50,9 @@ impl Render for TitleBar {
                             .icon(IconName::ArrowUp)
                             .tooltip(i18n_update(cx, "check"))
                             .loading(checking)
-                            .on_click(|_, _, cx| cx.dispatch_action(&UpdateAction::Check)),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(UpdateAction::Check), cx);
+                            }),
                     )
                 })
                 .child(
@@ -70,7 +72,9 @@ impl Render for TitleBar {
                     Button::new("title-diag")
                         .ghost()
                         .icon(IconName::ArrowDown)
-                        .on_click(|_, _, cx| cx.dispatch_action(&DiagnosticsAction::Export)),
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(DiagnosticsAction::Export), cx);
+                        }),
                 ),
         )
     }
